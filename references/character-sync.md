@@ -74,7 +74,9 @@ MinerU 的 model JSON 只对正文给 `ocr_text` 视觉行框，页脚脚注（`
 
 `ocrBackend` 选 `paddle` 或 `onnx`，其余配置项都一样。两者共用同一段裁图代码、同一套「CTC 列区间→字框」换算，**喂同一份权重时识别结果逐字相同**：在 world-ancient-lower 物理页 41–60 上逐行比对（batch=1，PP-OCRv5 mobile），683 行**字符串全等**，每个字框四个坐标的**最大绝对差为 0**，CPU 与 DirectML 两条路都是。
 
-两个后端的**默认模型现在不是同一份**：ONNX 默认 `PP-OCRv6_medium_rec`（DirectML 上跑得动的最好的那档），Paddle 后端仍默认 `PP-OCRv5_mobile_rec`。这么分是因为 Paddle 路径是「显卡不灵时还能跑」的回退，本机只留着 v5 mobile 那一份 Paddle 格式权重，换默认值会让回退路径去联网下载。所以换后端跑同一本书，文字会有细微出入（不是坐标口径变了，是模型变了）；要逐字对照两个后端，得显式把 `onnxModel` 和 `recognitionModel` 设成同一个模型。
+两个后端的**默认模型现在不是同一份**：ONNX 默认 `PP-OCRv6_medium_rec`（DirectML 上跑得动的最好的那档），Paddle 后端仍默认 `PP-OCRv5_mobile_rec`。这么分是因为 Paddle 路径是「显卡不灵时还能跑」的回退：v6 medium 在纯 CPU 上要 7.5 秒一页，拿它当回退等于没有回退。所以换后端跑同一本书，文字会有细微出入（不是坐标口径变了，是模型变了）；要逐字对照两个后端，得显式把 `onnxModel` 和 `recognitionModel` 设成同一个模型。
+
+`recognitionModel` 写 `PP-OCRv6_medium_rec` 本身是**可行**的（已验证）：PaddleOCR 3.7.0 的 `TextRecognition` 认这个模型名，`return_word_box=True` 返回的 `rec_text` 仍是 mapper 要的那个二元组。只是没把它设成默认，理由同上。
 
 模型目录都从 PaddleX 官方源取：`official_models.get_model_path("<模型名>", model_formats=["onnx"])` 落到 `~/.paddlex/official_models/<模型名>_onnx/`，里面是 `inference.onnx` 加 `inference.yml`。**字典和输入规格一律从该目录的 `inference.yml` 读，不按模型名写死**：字典取 `PostProcess.character_dict`（v5 是 18383 字、v6 是 18708 字，顺序也不同），输入规格取 `PreProcess.transform_ops` 里 `RecResizeImg.image_shape`（v5 与 v6 眼下都是 3×48×320，写死就等于赌下一代不改高度）。会话建好后还拿 ONNX 图里声明的静态维（通道与高）和 yml 对一次，对不上直接报错——两份文件是分开下载的，配错对不会有任何症状，只会安静地按错高度缩放、出一整本乱码。
 
@@ -111,7 +113,9 @@ ONNX 专有配置项：
 - 脚注小字另抽两页看（world-ancient-lower 物理页 81、13，行框取流水线自己检测出来的那批）：p81 v5 98.99% → v6 99.66%（v5 漏掉「教的学问」四字并串出一个杂字），p13 两者都 100%。注意 p81 的「答案」本身是 MinerU 抽出来的文本，把「彦悰」错成「彦惊」，v6 读对了反而被算成一个错——v6 的实际差距比表上更大。
 - v6 偶尔把全角括号读成半角（p13 的「（在今内蒙古…」）。标点不计入上面的准确率，但会进对齐；实测 8 本覆盖率没有因此变差。
 
-本机 `~/.paddlex/official_models/` 里**在用**的是三份：`PP-OCRv6_medium_rec_onnx`（ONNX 识别）、`PP-OCRv5_mobile_det`（补行框检测）、`PP-OCRv5_mobile_rec`（Paddle 后端回退）。`PP-OCRv5_mobile_rec_onnx`、`PP-OCRv5_server_rec_onnx`、`PP-OCRv5_server_rec` 已删（省 179 MB）；要回头跑 v5 的 ONNX 得先重新拉一次，命令见上，报错信息里也写了。
+本机 `~/.paddlex/official_models/` 现在的状况：**在用**三份——`PP-OCRv6_medium_rec_onnx`（ONNX 识别）、`PP-OCRv5_mobile_det`（补行框检测）、`PP-OCRv5_mobile_rec`（Paddle 后端回退）；**已删**三份——`PP-OCRv5_mobile_rec_onnx`、`PP-OCRv5_server_rec_onnx`、`PP-OCRv5_server_rec`（省 179 MB），要回头跑 v5 的 ONNX 得重新拉一次，命令见上，报错信息里也写了；**留着没用**三份——`PP-OCRv6_medium_rec`（Paddle 格式，把 `recognitionModel` 换成 v6 时才用得上）、`PP-OCRv6_medium_det` 与 `PP-OCRv6_medium_det_onnx`（检测还没换代，见下）。
+
+补行框的检测模型**暂未**跟着换到 v6：`PP-OCRv6_medium_det` 的 ONNX 拿得到，但 ONNX 上的 DB 后处理（二值化、取轮廓、按 unclip 比例外扩成框）得自己写一遍，而现有的 det-v2 兜底阈值（高度覆盖半块、面积覆盖半块，不过就走投影切行）是照着 v5 det 的行为调出来的，换检测器要重新验一遍；换了还会让全部 `lines/` 检测缓存失效，8 本得重跑检测。检测只影响脚注、目录这类无行框块，现在也不是瓶颈，所以留到有需要再动。
 
 依赖：Windows 装 `onnxruntime-directml`，其他平台装 `onnxruntime`，见 `scripts/sync-requirements.txt`；`pdf_sync.py check` 在 `ocrBackend=onnx` 时把 onnxruntime 一并列进依赖探测。**PaddleOCR 仍然必装**——补行框用的文本检测模型是 PaddleOCR 的，ONNX 后端只替换识别这一步。
 
