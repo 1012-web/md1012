@@ -1,0 +1,30 @@
+{
+  "version": "0.4.1-skill.1",
+  "source": "scripts/sync_mapper.py (this skill is the sole maintainer since 2026-09-11; the vault-side generate_map.py is retired)",
+  "sourceProject": "313 history vault",
+  "snapshotDate": "2026-09-12",
+  "sha256": "33e4fc8ce21832335c0a26d3a1954ac3462552bc7a6daa33092a699f443b95fb",
+  "changes": [
+    "annotation and wikilink masking including multiline notes",
+    "explicit Markdown input filenames",
+    "expected physical pages for coverage auditing",
+    "para_blocks fallback for middle JSON",
+    "page range offsets for multi-volume files (--page-range-offset)",
+    "catalog rebuild records only a vault-relative config path (--rebuild-config); no machine paths",
+    "merged bodies: chapter headings take their first printed page from frontmatter chapter_metadata",
+    "chapter_metadata is read by YAML indentation: nested lists are not new entries, flow sequences (pages: [61, 80]) are understood, one quote pair is stripped, and a repeated title keeps the first entry's page",
+    "headings and frontmatter titles share one normalization, and a heading title is taken from the block's first line only",
+    "parse_offset_config is shared with pdf_sync so a dry run cannot disagree with the real run; incomplete page range offsets raise one friendly message",
+    "catalog entries merge with the previous record (fields a run does not supply are kept) and are written atomically via os.replace",
+    "--pages removed from the mapper CLI: only --rerun-pages remains, and it forces a cache refresh without limiting the run",
+    "line recovery is det-v2: the crop bleeds about half a block height of white space on every side before detection (a one-line footnote cropped tight is an unreadable 25px strip), boxes centred outside the original block are dropped, and boxes sharing a text row are merged so the footnote marker joins its sentence instead of standing as its own line",
+    "detection that covers less than half the block by height OR by area is treated as a miss - a lone circled marker spans the full height on a twentieth of the width - and falls back: a block no taller than 1.6 body line heights (0.025 normalized where the page has no line boxes at all) is read whole, a taller one is cut by horizontal projection whose row gap calibrates on the block's own bands, so a text block can never end up with no line box",
+    "the detection cache key carries the algorithm version (LINE_DETECTION_ALGORITHM), so a recipe change retires the results of the previous one while the pNNNN.json recognition caches keep their append path",
+    "line-less text blocks (page_footnote above all, plus index/ref_text/image_caption/image_footnote/aside_text) get their line boxes from PP-OCRv5_mobile_det detection run on the block crop only; running heads, page numbers, footers, tables and formulas are deliberately excluded so alignment gets no text the Markdown lacks",
+    "the OCR cache filename carries a short hash of the page's whole line set (p0024-<hash8>.json), so a page whose line set grew can no longer hide behind an old cache file",
+    "a pre-supplement p0024.json cache is reused instead of discarded: only the supplementary lines are recognized and their characters are appended after the cached ones, which holds because those lines are read last",
+    "detected line boxes are cached under lines/p0024-<blockhash>.json, so a repeat run needs neither a page render nor the detection model"
+  ],
+  "compatibility": "MinerU PDF Sync sidecar schema version 1",
+  "maintenance": "Bundled snapshot. Update deliberately with mapper tests and sidecar compatibility checks; never overwrite a local plugin automatically."
+}

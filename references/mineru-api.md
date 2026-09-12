@@ -36,6 +36,8 @@ Authorization: Bearer <token>
 
 ## 本地文件流程
 
+提交前使用 `scripts/pdf_preflight.py` 作本地预检并对照异常页原图。客户端的 `auto` 仅依据少量抽样页的文字量，不能判断文字层准确性。存在文字层但质量较差时先建议、等用户选择是否重做；用户已明确要求的 OCR 路线不重复询问。决定后显式传 `--ocr on/off`。重新 OCR 本身不启用逐字 sidecar 流程。
+
 1. `POST /api/v4/file-urls/batch`：提交文件名、`data_id`、`is_ocr` 与模型配置，取得 `batch_id` 和顺序对应的 `file_urls`。
 2. 对每个预签名 URL 执行 `PUT`，只发送文件字节和 `Content-Length`，不要设置额外的 `Content-Type`。
 3. `GET /api/v4/extract-results/batch/{batch_id}`：每 5 秒轮询，直到每项为 `done` 或 `failed`。

@@ -5,6 +5,23 @@ description: 通过 MinerU 精准解析 API 获取 PDF 解析产物，并把输�
 
 # MinerU 输出整理
 
+## 模式选择（每份新材料重新判断）
+
+默认走下方普通转换流程。“转 Markdown”“整理 MinerU 输出”“转成 Obsidian 笔记”及“重新 OCR”均不启动逐字映射，不安装 PaddleOCR，不产生逐字 sidecar。只有用户明确要求“逐字对应 PDF”“选中文字精确定位原文”等能力，才追加逐字模式；“联动”等模糊表述先确认。之前某本书采用逐字模式，不改变新材料的默认值。
+
+- 普通转换：PDF 预检 → 确定 OCR 路线 → 获取或复用 MinerU 产物 → 审计与重建 → 核对标题、页码、脚注 → 按章/节拆分 → 校验与 diff → 文件交付。
+- 逐字模式：普通转换完成并确定最终 Markdown（已有成品直接复用）→ 读取 [references/character-sync.md](references/character-sync.md) → 使用随 skill 提供的映射入口。默认只交付文件，不安装/更新插件或打开 Obsidian。
+
+### PDF 本地预检
+
+提交前先运行 `python -X utf8 scripts/pdf_preflight.py <PDF> --output <预检报告.json>`。它不上传文件、不调用 OCR、不读取 API Token；抽样首尾及均匀分布页面，报告文字量、可疑码位、标点与页面差异。已有完整解析产物优先复用，不为预检而重新提交。
+
+文字可提取不代表内容正确。报告中的异常仅是线索；对照对应 PDF 原图确认乱码、丢标点等问题，尤其不能把古籍无标点或目录、封面少字直接判错。没有可提取文字时推荐 OCR；有文字层但质量较差/混合时，说明抽样依据并等待用户选择是否重做。用户本次已明确要求重做时，使用 `--ocr on` 记录已确定的路线，无需重复询问。全无文字的扫描件可按普通流程直接 OCR。
+
+`is_ocr` 请求参数不等于已经证明旧文字层被忽略。用户要求严格忽略文字层时，优先使用已验证的解析路线；必要时生成仅含渲染图的临时上传副本，保留原 PDF，按原图核验输出。
+
+已入库教材只读；新增映射不重新输出正文。保留用户 `<mark>/<u>/<s>` 标签、`data-id` 和 `%%@id 备注%%`，这些标注不参与 PDF 字位匹配。具体目录和入库日志遵循目标仓库规则；不把当前考研仓库路径写死到工具中。
+
 核心工作不是“转格式”，是**把 MinerU 丢掉的信息捡回来，同时不给原文添字**。
 
 ## 一个必须先知道的事实
@@ -50,7 +67,7 @@ python <skill>/scripts/mineru_api.py submit a.pdf [b.pdf ...] -o <输出目录>
 
 客户端必须完成这些事：
 
-1. 用 `pypdf` 检查页数、加密状态和文字层；扫描件自动开启 OCR。
+1. 先完成上述本地预检与 OCR 路线选择。客户端 `auto` 只用文字量作简易判断，不能替代质量核查；已确定路线时显式传 `--ocr on/off`。扫描件自动开启 OCR。
 2. 原 PDF 永不改动。超过 200 页或 200 MB 时，以页面对象复制方式无损拆成合规分卷；分卷按源文件路径、大小和修改时间指纹缓存在输出目录的 `_upload_cache/`，再次提交同一文件直接复用。单批最多 50 个本地文件。
 3. 调用 `/api/v4/file-urls/batch`，把文件 PUT 到预签名地址，轮询 `/api/v4/extract-results/batch/{batch_id}`。
 4. 下载并安全解压 `full_zip_url`；输出重名时另起名字，不覆盖旧结果。
@@ -141,7 +158,10 @@ python <skill>/scripts/split_book.py <论文.md> -o <输出目录> \
 python <skill>/scripts/verify.py <成品.md>
 python <skill>/scripts/diff_report.py <目录> <成品.md>
 python <skill>/scripts/diff_report.py d1,d2,d3 "书/[01]*.md"   # 多段源 -> 多个分章
+python -X utf8 <skill>/scripts/copy_images.py <MinerU输出目录> <成品目录> --report <报告.json>
 ```
+
+图片不要整目录拷：`copy_images.py` 只复制成品 Markdown 真正引用到的图片，MinerU 多吐出来的页眉、装饰图、重复裁图留在原目录，报告里列为 orphans；已有同名不同内容的文件不覆盖（退出码 3；2 留给命令行用法错误）。引用的写法认全：`![alt](images/x.png "标题")`、`![](<images/含 空格.png>)`、`%20` 之类的 URL 转义、`![[x.png|300]]`、带引号或不带引号的 `<img src=...>`、以及 `[ref]: images/x.png` 这种引用式定义；扩展名覆盖 png/jpg/jpeg/gif/webp/bmp/jp2/svg/tif/tiff/avif。源目录下**所有** `images/` 目录会被一并收集合并（拆卷解析会有好几个），因此多段源只需对每个**成品目录**跑一次，不必按 part 跑；不同 part 出现同名但内容不同的图片时不猜，报告到 `sourceDuplicates` 并计入退出码 3。
 
 多目录/多文件时两侧按给定顺序拼接后比对，顺序必须与原书一致。卷首、版权页、目录、书末书签这些没进成品的部分会整块出现在「删」里，是预期的。
 
