@@ -1009,6 +1009,44 @@ def test_onnx_charset_puts_blank_first_and_space_last(tmp_path: Path) -> None:
     assert MODULE.onnx_charset(tmp_path) == ["blank", "甲", "乙", " "]
 
 
+def test_onnx_shape_comes_from_the_model_yml(tmp_path: Path) -> None:
+    pytest.importorskip("yaml")
+    (tmp_path / "inference.yml").write_text(
+        "PreProcess:\n  transform_ops:\n"
+        "    - DecodeImage:\n        img_mode: BGR\n"
+        "    - RecResizeImg:\n        image_shape:\n          - 3\n          - 64\n          - 512\n",
+        encoding="utf-8",
+    )
+
+    assert MODULE.onnx_recognition_shape(tmp_path) == (3, 64, 512)
+
+
+def test_onnx_shape_falls_back_when_the_yml_says_nothing(tmp_path: Path) -> None:
+    pytest.importorskip("yaml")
+    (tmp_path / "inference.yml").write_text("PostProcess:\n  name: CTCLabelDecode\n", encoding="utf-8")
+
+    assert MODULE.onnx_recognition_shape(tmp_path) == MODULE.ONNX_RECOGNITION_SHAPE
+
+
+def test_onnx_input_shape_check_catches_a_mismatched_yml() -> None:
+    directory = Path("C:/x/PP-OCRv6_medium_rec_onnx")
+    # 批量与宽是动态维，只有通道与高能比；高对不上就是 yml 和 onnx 配错了对
+    MODULE.verify_onnx_input_shape((3, 48, 320), ["N", 3, 48, "W"], directory)
+    with pytest.raises(RuntimeError, match="do not match"):
+        MODULE.verify_onnx_input_shape((3, 64, 512), ["N", 3, 48, "W"], directory)
+    # 图里一个静态维都没有就没法比，不报错
+    MODULE.verify_onnx_input_shape((3, 64, 512), ["N", "C", "H", "W"], directory)
+
+
+def test_onnx_resize_honours_a_taller_model() -> None:
+    numpy = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    # 同一张图换成高 64 的网络：目标宽按 64 * 10 = 640 算，而不是 48 那套
+    prepared = MODULE.onnx_resize_normalize(numpy.zeros((24, 240, 3), dtype=numpy.uint8), (3, 64, 512))
+
+    assert prepared.shape == (3, 64, 640)
+
+
 def test_onnx_resize_keeps_the_paddle_geometry() -> None:
     numpy = pytest.importorskip("numpy")
     pytest.importorskip("cv2")

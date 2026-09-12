@@ -51,12 +51,17 @@ PAGE_RANGE_HINT = "page range offset must look like 'file|start-end|offset': "
 FILE_OFFSET_HINT = "file offset must look like 'file|offset': "
 PAGE_OVERRIDE_HINT = "page override must look like 'file|printed|physical': "
 DEFAULT_DETECTION_MODEL = "PP-OCRv5_mobile_det"
-# paddlex --paddle2onnx 导出的目录名：识别模型名后面缀 _onnx，与 Paddle 原生权重并排放着。
+# ONNX 后端的默认识别模型。Paddle 后端（--rec-model）仍默认 PP-OCRv5_mobile_rec：
+# 本机只留着那一份 Paddle 格式的权重，换默认值会让「装了 paddleocr 就能跑」的回退路径去联网下载。
+DEFAULT_ONNX_MODEL = "PP-OCRv6_medium_rec"
+# PaddleX 官方源里 ONNX 版的目录名：识别模型名后面缀 _onnx，与 Paddle 原生权重并排放着。
 ONNX_MODEL_DIRECTORIES = {
     "PP-OCRv5_mobile_rec": "PP-OCRv5_mobile_rec_onnx",
     "PP-OCRv5_server_rec": "PP-OCRv5_server_rec_onnx",
+    "PP-OCRv6_medium_rec": "PP-OCRv6_medium_rec_onnx",
 }
-# PP-OCRv5 识别网络的输入规格 (通道, 高, 基准宽)，与 inference.yml 的 RecResizeImg 一致。
+# 识别网络输入规格 (通道, 高, 基准宽) 的兜底值；实际按模型目录 inference.yml 的 RecResizeImg 读。
+# PP-OCRv5 与 PP-OCRv6 目前都是 3x48x320，但写死就等于赌下一代不改，所以只当默认值用。
 ONNX_RECOGNITION_SHAPE = (3, 48, 320)
 ONNX_MAX_IMAGE_WIDTH = 3200
 # Bump whenever the line-recovery recipe changes: it keys the detection cache, so old results stop being replayed.
@@ -981,26 +986,69 @@ def onnx_model_directory(name: str) -> Path:
     return directory
 
 
-def onnx_charset(model_directory: Path) -> list[str]:
-    """从 inference.yml 取字典，按 PaddleX 的 CTCLabelDecode 补上空格与 blank。"""
+def onnx_inference_config(model_directory: Path) -> dict[str, Any]:
+    """读模型目录里的 inference.yml；字典与输入规格都从这里来，不按模型名去猜。"""
     try:
         import yaml
     except ImportError as error:
         raise RuntimeError("PyYAML is required to read the ONNX model dictionary") from error
     with (model_directory / "inference.yml").open(encoding="utf-8", errors="strict") as handle:
-        config = yaml.safe_load(handle)
+        return yaml.safe_load(handle)
+
+
+def onnx_charset(model_directory: Path) -> list[str]:
+    """从 inference.yml 取字典，按 PaddleX 的 CTCLabelDecode 补上空格与 blank。"""
+    config = onnx_inference_config(model_directory)
     characters = list(config["PostProcess"]["character_dict"])
     # use_space_char 先追加空格，add_special_char 再把 blank 放到 0 号；顺序反了整本书都会错位。
     characters.append(" ")
     return ["blank"] + characters
 
 
-def onnx_resize_normalize(image: Any, max_image_width: int = ONNX_MAX_IMAGE_WIDTH) -> Any:
+def onnx_recognition_shape(model_directory: Path) -> tuple[int, int, int]:
+    """从 inference.yml 的 RecResizeImg 取 (通道, 高, 基准宽)。
+
+    PP-OCRv5 与 PP-OCRv6 眼下都是 3x48x320，但把 48 写死等于赌下一代不改高度：
+    高度错了整页识别会变成一串乱码，而报错要等到推理才出现，很难回溯。
+    """
+    config = onnx_inference_config(model_directory)
+    for operator in config.get("PreProcess", {}).get("transform_ops") or []:
+        if not isinstance(operator, dict) or "RecResizeImg" not in operator:
+            continue
+        shape = (operator["RecResizeImg"] or {}).get("image_shape")
+        if isinstance(shape, (list, tuple)) and len(shape) == 3:
+            return (int(shape[0]), int(shape[1]), int(shape[2]))
+    return ONNX_RECOGNITION_SHAPE
+
+
+def verify_onnx_input_shape(shape: tuple[int, int, int], graph_shape: Any, model_directory: Path) -> None:
+    """核对 inference.yml 的输入规格与 inference.onnx 图里声明的静态维。
+
+    两份文件是分开下载的，配错对（把 v5 的 yml 留在 v6 目录里）不会有任何报错，
+    只会安静地按错高度缩放，出一整本乱码。图里通道与高是静态维，正好能当校验；
+    批量与宽是动态维，字符串形式，跳过不比。
+    """
+    dimensions = list(graph_shape or [])
+    if len(dimensions) != 4:
+        return
+    for index, declared in enumerate(dimensions[1:3]):
+        if isinstance(declared, int) and declared != shape[index]:
+            raise RuntimeError(
+                f"{model_directory.name}: inference.yml says image_shape={list(shape)} but "
+                f"inference.onnx declares input {dimensions}; the two files do not match"
+            )
+
+
+def onnx_resize_normalize(
+    image: Any,
+    shape: tuple[int, int, int] = ONNX_RECOGNITION_SHAPE,
+    max_image_width: int = ONNX_MAX_IMAGE_WIDTH,
+) -> Any:
     """与 PaddleX OCRReisizeNormImg.resize 等价：逐图算宽高比，右侧补零。"""
     import cv2
     import numpy as np
 
-    channels, target_height, base_width = ONNX_RECOGNITION_SHAPE
+    channels, target_height, base_width = shape
     height, width = image.shape[:2]
     ratio = width / float(height)
     target_width = int(target_height * max(base_width / target_height, ratio))
@@ -1042,7 +1090,9 @@ def onnx_ctc_decode(probabilities: Any, charset: list[str]) -> tuple[list[str], 
 
 
 class OnnxCharacterOCR:
-    """ONNX Runtime 上的 PP-OCRv5 识别，预处理与 CTC 解码逐字对齐 PaddleX。
+    """ONNX Runtime 上的 PP-OCR 识别，预处理与 CTC 解码逐字对齐 PaddleX。
+
+    字典与输入规格都从模型目录的 inference.yml 读，所以同一份代码能跑 PP-OCRv5 与 PP-OCRv6。
 
     存在的理由是速度：同一批行图，DirectML 上的独显比 PaddlePaddle 的 CPU 路径快一个量级，
     纯 CPU 的 ONNX 也比 Paddle 原生快三四倍，而识别结果与 Paddle 逐字相同。
@@ -1068,6 +1118,7 @@ class OnnxCharacterOCR:
             ) from error
         self.model_directory = onnx_model_directory(model)
         self.charset = onnx_charset(self.model_directory)
+        self.shape = onnx_recognition_shape(self.model_directory)
         self.batch_size = max(1, batch_size)
         self.writing_mode = writing_mode
         self.provider, self.device_id, self.device_name = resolve_onnx_device(
@@ -1086,7 +1137,9 @@ class OnnxCharacterOCR:
         self.session = onnxruntime.InferenceSession(
             str(self.model_directory / "inference.onnx"), sess_options=options, providers=providers
         )
-        self.input_name = self.session.get_inputs()[0].name
+        model_input = self.session.get_inputs()[0]
+        self.input_name = model_input.name
+        verify_onnx_input_shape(self.shape, model_input.shape, self.model_directory)
 
     @property
     def cache_scope(self) -> str:
@@ -1101,9 +1154,9 @@ class OnnxCharacterOCR:
     def run_batch(self, crops: list[Any]) -> list[tuple[list[str], list[float]]]:
         import numpy as np
 
-        prepared = [onnx_resize_normalize(crop) for crop in crops]
+        prepared = [onnx_resize_normalize(crop, self.shape) for crop in crops]
         width = max(item.shape[2] for item in prepared)
-        batch = np.zeros((len(prepared), *ONNX_RECOGNITION_SHAPE[:2], width), dtype=np.float32)
+        batch = np.zeros((len(prepared), *self.shape[:2], width), dtype=np.float32)
         for index, item in enumerate(prepared):
             batch[index, :, :, : item.shape[2]] = item
         output = self.session.run(None, {self.input_name: batch})[0]
@@ -2114,9 +2167,9 @@ def main() -> None:
     parser.add_argument("--ocr-backend", choices=("paddle", "onnx", "tesseract", "kraken"), default="paddle")
     parser.add_argument(
         "--onnx-model",
-        default="PP-OCRv5_mobile_rec",
-        help="ONNX recognition model: PP-OCRv5_mobile_rec, PP-OCRv5_server_rec, or a directory "
-             "containing inference.onnx and inference.yml",
+        default=DEFAULT_ONNX_MODEL,
+        help="ONNX recognition model: PP-OCRv6_medium_rec, PP-OCRv5_mobile_rec, PP-OCRv5_server_rec, "
+             "or a directory containing inference.onnx and inference.yml",
     )
     parser.add_argument(
         "--onnx-device",

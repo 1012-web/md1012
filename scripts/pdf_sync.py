@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parent
 # 只有坐标口径验证过的后端能从这个入口跑：两者共用同一套「列区间→字框」的换算，
 # 在 world-ancient-lower 物理页 41-60 上逐行比对过，683 行字符串全等、字框坐标零偏差。
 SUPPORTED_BACKENDS = frozenset({"paddle", "onnx"})
+# ONNX 后端的默认识别模型，与 sync_mapper.DEFAULT_ONNX_MODEL 同义；
+# 这里不 import sync_mapper 是因为 command_args 要在没装 onnxruntime 的机器上也能拼出命令。
+DEFAULT_ONNX_MODEL = "PP-OCRv6_medium_rec"
 
 
 def read_json(path: Path):
@@ -212,7 +215,7 @@ def onnx_identity(config: dict) -> dict:
     """
     import sync_mapper as mapper
 
-    directory = mapper.onnx_model_directory(config.get("onnxModel", "PP-OCRv5_mobile_rec"))
+    directory = mapper.onnx_model_directory(config.get("onnxModel", DEFAULT_ONNX_MODEL))
     import onnxruntime
 
     provider, device_id, _ = mapper.resolve_onnx_device(
@@ -250,7 +253,7 @@ def command_args(config: dict, output: Path, cache: Path, rerun: str | None) -> 
             "--rec-batch-size", str(config.get("recBatchSize", 16)),
             "--render-scale", str(config.get("renderScale", 2.0))]
     if config.get("ocrBackend", "paddle") == "onnx":
-        args.extend(["--onnx-model", config.get("onnxModel", "PP-OCRv5_mobile_rec"),
+        args.extend(["--onnx-model", config.get("onnxModel", DEFAULT_ONNX_MODEL),
                      "--onnx-device", config.get("onnxDevice", "auto")])
         if config.get("onnxDeviceId") is not None:
             args.extend(["--onnx-device-id", str(config["onnxDeviceId"])])
