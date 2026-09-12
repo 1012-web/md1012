@@ -16,6 +16,9 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+# 只有坐标口径验证过的后端能从这个入口跑：两者共用同一套「列区间→字框」的换算，
+# 在 world-ancient-lower 物理页 41-60 上逐行比对过，683 行字符串全等、字框坐标零偏差。
+SUPPORTED_BACKENDS = frozenset({"paddle", "onnx"})
 
 
 def read_json(path: Path):
@@ -83,8 +86,20 @@ def load_config(path: Path) -> dict:
     raw = read_json(path)
     if raw.get("mode") != "character":
         raise ValueError("Explicit mode=character is required; ordinary conversion uses mineru_api.py")
-    if raw.get("ocrBackend", "paddle") != "paddle":
-        raise ValueError("This verified entry accepts PaddleOCR only; alternate engines require separate coordinate validation")
+    backend = raw.get("ocrBackend", "paddle")
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            "This entry accepts the coordinate-verified engines only "
+            f"({', '.join(sorted(SUPPORTED_BACKENDS))}); others require separate coordinate validation"
+        )
+    if raw.get("onnxDevice", "auto") not in {"cpu", "dml", "auto"}:
+        raise ValueError("onnxDevice must be cpu, dml or auto")
+    device_id = raw.get("onnxDeviceId")
+    if device_id is not None and (not isinstance(device_id, int) or isinstance(device_id, bool) or device_id < 0):
+        raise ValueError("onnxDeviceId must be a non-negative integer")
+    batch = raw.get("recBatchSize", 16)
+    if not isinstance(batch, int) or isinstance(batch, bool) or not 1 <= batch <= 256:
+        raise ValueError("recBatchSize must be an integer between 1 and 256")
     for key in ("bookId", "title", "pdf", "markdownRoot", "layoutParts", "modelParts", "printedPageOffset"):
         if key not in raw:
             raise ValueError(f"Missing config field: {key}")
@@ -135,17 +150,37 @@ def load_config(path: Path) -> dict:
     return raw
 
 
-def dependency_report() -> dict:
-    required = {"paddleocr": "paddleocr", "paddlepaddle": "paddle", "PyMuPDF": "pymupdf", "numpy": "numpy", "Pillow": "PIL"}
-    out = {}
-    for package, module in required.items():
+def package_version(names: tuple[str, ...]) -> str | None:
+    """同一个模块可能由不同发行包提供（onnxruntime / onnxruntime-directml），逐个试。"""
+    for name in names:
         try:
-            out[package] = {"available": importlib.util.find_spec(module) is not None,
-                            "version": importlib.metadata.version(package)}
-        except (ImportError, importlib.metadata.PackageNotFoundError):
-            out[package] = {"available": False}
+            return importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return None
+
+
+def dependency_report(backend: str = "paddle") -> dict:
+    # PaddleOCR 始终要装：即便识别走 ONNX，补行框用的检测模型仍是 PaddleOCR 的。
+    modules = {"paddleocr": "paddleocr", "paddlepaddle": "paddle", "PyMuPDF": "pymupdf",
+               "numpy": "numpy", "Pillow": "PIL"}
+    distributions = {"paddleocr": ("paddleocr",), "paddlepaddle": ("paddlepaddle",),
+                     "PyMuPDF": ("PyMuPDF",), "numpy": ("numpy",), "Pillow": ("Pillow",)}
+    if backend == "onnx":
+        modules["onnxruntime"] = "onnxruntime"
+        distributions["onnxruntime"] = ("onnxruntime-directml", "onnxruntime", "onnxruntime-gpu")
+    out = {}
+    for package, module in modules.items():
+        try:
+            available = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            available = False
+        version = package_version(distributions[package])
+        out[package] = ({"available": True, "version": version}
+                        if available and version else {"available": False})
     return {"python": sys.version.split()[0], "python311": sys.version_info[:2] == (3, 11),
-            "packages": out, "modelWeights": "Not loaded by check; first generation may download model weights.",
+            "backend": backend, "packages": out,
+            "modelWeights": "Not loaded by check; first generation may download model weights.",
             "requirements": str(ROOT / "sync-requirements.txt")}
 
 
@@ -170,13 +205,34 @@ def inspect_inputs(config: dict) -> dict:
             "physicalPages": sorted(pages), "missingVisualLinePages": sorted(pages - set(lines))}
 
 
+def onnx_identity(config: dict) -> dict:
+    """ONNX 后端里会改变识别结果的东西：模型权重、实际落到哪个 provider、批量大小。
+
+    provider 要解析过才知道（auto 可能退回 CPU），所以这里真的去问一次 onnxruntime。
+    """
+    import sync_mapper as mapper
+
+    directory = mapper.onnx_model_directory(config.get("onnxModel", "PP-OCRv5_mobile_rec"))
+    import onnxruntime
+
+    provider, device_id, _ = mapper.resolve_onnx_device(
+        onnxruntime, config.get("onnxDevice", "auto"), config.get("onnxDeviceId")
+    )
+    return {"model": sha256(directory / "inference.onnx"), "provider": provider,
+            "deviceId": device_id, "batchSize": config.get("recBatchSize", 16)}
+
+
 def cache_directory(config: dict) -> Path:
     # Isolate cached positions by the image and recognition inputs, not just page number.
+    backend = config.get("ocrBackend", "paddle")
     identity = {"pdf": sha256(config["pdf"]), "model": config.get("recognitionModel", "PP-OCRv5_mobile_rec"),
                 "scale": config.get("renderScale", 2.0), "writingMode": config.get("writingMode", "horizontal-tb"),
                 "lineSources": [(sha256(p), start) for p, start in config["modelParts"]],
                 "mapper": sha256(ROOT / "sync_mapper.py"),
-                "packages": dependency_report()["packages"]}
+                "backend": backend, "batchSize": config.get("recBatchSize", 16),
+                "packages": dependency_report(backend)["packages"]}
+    if backend == "onnx":
+        identity["onnx"] = onnx_identity(config)
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     return config["cache"] / config["bookId"] / key
 
@@ -188,10 +244,16 @@ def command_args(config: dict, output: Path, cache: Path, rerun: str | None) -> 
             "--pdf", config["pdf"].relative_to(vault).as_posix(),
             "--markdown-root", config["markdownRoot"].relative_to(vault).as_posix(),
             "--offset", str(config["printedPageOffset"]), "--output", output.relative_to(vault).as_posix(),
-            "--cache", str(cache), "--ocr-backend", "paddle",
+            "--cache", str(cache), "--ocr-backend", config.get("ocrBackend", "paddle"),
             "--writing-mode", config.get("writingMode", "horizontal-tb"),
             "--rec-model", config.get("recognitionModel", "PP-OCRv5_mobile_rec"),
+            "--rec-batch-size", str(config.get("recBatchSize", 16)),
             "--render-scale", str(config.get("renderScale", 2.0))]
+    if config.get("ocrBackend", "paddle") == "onnx":
+        args.extend(["--onnx-model", config.get("onnxModel", "PP-OCRv5_mobile_rec"),
+                     "--onnx-device", config.get("onnxDevice", "auto")])
+        if config.get("onnxDeviceId") is not None:
+            args.extend(["--onnx-device-id", str(config["onnxDeviceId"])])
     for key, flag in (("layoutParts", "--layout-part"), ("modelParts", "--model-part")):
         for source, start in config[key]:
             args.extend([flag, f"{source}|{start}"])
@@ -253,7 +315,7 @@ def audit_output(vault: Path, index_path: Path) -> dict:
 
 def generate(config: dict, rerun: str | None = None) -> dict:
     inputs = inspect_inputs(config)
-    dependencies = dependency_report()
+    dependencies = dependency_report(config.get("ocrBackend", "paddle"))
     if not dependencies["python311"] or not all(p["available"] for p in dependencies["packages"].values()):
         raise ValueError("Use isolated Python 3.11 with sync-requirements.txt; run check for details")
     import pymupdf
@@ -296,7 +358,7 @@ def main() -> None:
         parser.error("rerun requires --pages; other actions do not accept --pages")
     config = load_config(args.config)
     if args.action == "check":
-        print(json.dumps({"inputs": inspect_inputs(config), "dependencies": dependency_report()}, ensure_ascii=True))
+        print(json.dumps({"inputs": inspect_inputs(config), "dependencies": dependency_report(config.get("ocrBackend", "paddle"))}, ensure_ascii=True))
         return
     report = generate(config, args.pages)
     print("SYNC_REPORT " + str(Path(report["output"]) / "delivery-report.json").encode("ascii", "backslashreplace").decode("ascii"))

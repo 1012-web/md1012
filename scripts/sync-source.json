@@ -3,7 +3,7 @@
   "source": "scripts/sync_mapper.py (this skill is the sole maintainer since 2026-09-11; the vault-side generate_map.py is retired)",
   "sourceProject": "313 history vault",
   "snapshotDate": "2026-09-12",
-  "sha256": "33e4fc8ce21832335c0a26d3a1954ac3462552bc7a6daa33092a699f443b95fb",
+  "sha256": "27ef96eddfa8323d626354b1b3e8f8f42e27e3d5ae350c469eb05a910c2d6ded",
   "changes": [
     "annotation and wikilink masking including multiline notes",
     "explicit Markdown input filenames",
@@ -23,7 +23,15 @@
     "line-less text blocks (page_footnote above all, plus index/ref_text/image_caption/image_footnote/aside_text) get their line boxes from PP-OCRv5_mobile_det detection run on the block crop only; running heads, page numbers, footers, tables and formulas are deliberately excluded so alignment gets no text the Markdown lacks",
     "the OCR cache filename carries a short hash of the page's whole line set (p0024-<hash8>.json), so a page whose line set grew can no longer hide behind an old cache file",
     "a pre-supplement p0024.json cache is reused instead of discarded: only the supplementary lines are recognized and their characters are appended after the cached ones, which holds because those lines are read last",
-    "detected line boxes are cached under lines/p0024-<blockhash>.json, so a repeat run needs neither a page render nor the detection model"
+    "detected line boxes are cached under lines/p0024-<blockhash>.json, so a repeat run needs neither a page render nor the detection model",
+    "character boxes are scaled from the CTC column numbers themselves ([first-half a step, last+half a step] stretched over MinerU's line box) instead of word_info[0]: PaddleX sorts the batch by aspect ratio when it computes the valid column count but writes it back in the original order, so every line was given another line's ratio - a long line came out as only its first few characters (the rest collapsed to zero width and were dropped) and a short line was squeezed into the start of its own line box",
+    "an Obsidian block identifier at the end of a line (## 注释 ^tb-c01-h0053) is masked out of the visible text and out of the normalized heading title: it is a link target, not print, and it used to cost every such heading thirteen characters of coverage",
+    "page characters are re-ordered into layout reading order before alignment: inside a horizontal band whose lines split into disjoint columns the left column is read first, so a hanging sub-heading (title on the left half, body text set beside it on the same lines) no longer interleaves with that body text and stops being dropped by the monotonic alignment; bands and within-column order are untouched",
+    "a second recognition backend runs the same PP-OCRv5 weights on ONNX Runtime (--ocr-backend onnx, --onnx-model, --onnx-device cpu|dml|auto, --onnx-device-id, batched with --rec-batch-size): both backends share one cropping routine and one chars_from_columns, so a line yields identical text and identical boxes - 683 lines over physical pages 41-60 of world-ancient-lower compared line by line came out equal with a maximum coordinate difference of 0 on CPU and on DirectML; only speed differs (20 pages: paddle CPU 81.8s, onnx CPU 88.5s, onnx DirectML 10.3s on a Radeon RX 9070 GRE)",
+    "DirectML adapter selection enumerates DXGI and takes the adapter with the most dedicated video memory instead of DirectML's default device 0, which is commonly the integrated GPU and an order of magnitude slower; auto falls back to CPU when no discrete adapter is found, and the provider and adapter name are printed on the mapper's closing line",
+    "the OCR cache is separated per backend: load_or_run_ocr honours an engine-supplied cache_scope (onnx-<model>-<provider>-b<batch>) and pdf_sync folds the backend name, the ONNX model file hash, the resolved provider, the adapter index and the batch size into the cache identity",
+    "line recovery now also runs for the ONNX backend: its detection model is PaddleOCR's either way, so a footnote or a table of contents keeps its recovered line boxes; Tesseract and Kraken still skip it to stay installable without PaddlePaddle",
+    "dot leaders are collapsed before alignment: a run of two or more dot characters (. and the middle-dot family) becomes one unit on both sides, because Markdown writes two ellipses that NFKC expands into six periods while the page carries dozens of printed dots, and the surplus used to push the page number after them out of the alignment window; a single middle dot is left alone since it is a real separator in Chinese titles, and the collapsed unit carries every source character in the run so each one still receives the leader's bounding box"
   ],
   "compatibility": "MinerU PDF Sync sidecar schema version 1",
   "maintenance": "Bundled snapshot. Update deliberately with mapper tests and sidecar compatibility checks; never overwrite a local plugin automatically."

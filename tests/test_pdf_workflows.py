@@ -113,8 +113,13 @@ def test_explicit_opt_in_and_alternate_backend_rejected(book):
         sync.load_config(path)
     raw.update(mode="character", ocrBackend="tesseract")
     write(path, json.dumps(raw))
-    with pytest.raises(ValueError, match="PaddleOCR only"):
+    with pytest.raises(ValueError, match="coordinate-verified engines only"):
         sync.load_config(path)
+    # 坐标口径验证过的两个后端都要放行。
+    for backend in ("paddle", "onnx"):
+        raw.update(ocrBackend=backend)
+        write(path, json.dumps(raw))
+        assert sync.load_config(path)["ocrBackend"] == backend
 
 
 def test_check_has_no_output_or_ocr_import(book):
@@ -148,7 +153,7 @@ def test_generate_and_rerun_preserve_all_pages_and_inputs(book, monkeypatch):
     monkeypatch.setattr(mapper, "PaddleCharacterOCR", FakeOCR)
     monkeypatch.setattr(mapper, "load_or_run_ocr", fake_load)
     monkeypatch.setattr(sync.subprocess, "run", run)
-    monkeypatch.setattr(sync, "dependency_report", lambda: {"python311": True, "packages": {"stub": {"available": True}}})
+    monkeypatch.setattr(sync, "dependency_report", lambda backend="paddle": {"python311": True, "packages": {"stub": {"available": True}}})
     first = sync.generate(config)
     assert first["blockAcceptance"] == "passed"
     assert first["mappedCharacters"] == 4
@@ -415,7 +420,7 @@ def test_rebuild_config_is_recorded_vault_relative_when_config_inside_vault(book
     monkeypatch.setattr(mapper, "PaddleCharacterOCR", FakeOCR)
     monkeypatch.setattr(mapper, "load_or_run_ocr", fake_load)
     monkeypatch.setattr(sync.subprocess, "run", run)
-    monkeypatch.setattr(sync, "dependency_report", lambda: {"python311": True, "packages": {"stub": {"available": True}}})
+    monkeypatch.setattr(sync, "dependency_report", lambda backend="paddle": {"python311": True, "packages": {"stub": {"available": True}}})
     report = sync.generate(config)
     catalog = sync.read_json(vault / "sync" / "catalog.json")
     entry = next(b for b in catalog["books"] if b["id"] == "test-book")
@@ -465,7 +470,7 @@ def test_footnote_block_without_line_boxes_is_detected_and_read_last(book, monke
     monkeypatch.setattr(mapper, "PaddleLineDetector", StubDetector)
     monkeypatch.setattr(mapper, "load_or_run_ocr", fake_load)
     monkeypatch.setattr(sync.subprocess, "run", run)
-    monkeypatch.setattr(sync, "dependency_report", lambda: {"python311": True, "packages": {"stub": {"available": True}}})
+    monkeypatch.setattr(sync, "dependency_report", lambda backend="paddle": {"python311": True, "packages": {"stub": {"available": True}}})
     sync.generate(config)
 
     # 检测器懒加载一次，两页复用
@@ -477,3 +482,72 @@ def test_footnote_block_without_line_boxes_is_detected_and_read_last(book, monke
         extra = [rect for rect in lines if rect not in base]
         assert extra == [(0.1, 0.805, 0.89, 0.84), (0.1, 0.855, 0.89, 0.89)]
         assert mapper.lines_follow(base, extra, "horizontal-tb")
+
+
+# --- ONNX 后端的配置透传与缓存隔离 ---------------------------------------------
+
+
+def test_onnx_settings_reach_the_mapper_command_line(book, tmp_path):
+    path, raw = book
+    raw.update(ocrBackend="onnx", onnxModel="PP-OCRv5_server_rec", onnxDevice="dml",
+               onnxDeviceId=1, recBatchSize=8)
+    write(path, json.dumps(raw, ensure_ascii=False))
+    config = sync.load_config(path)
+
+    args = sync.command_args(config, config["output"], tmp_path / "cache", None)
+
+    assert args[args.index("--ocr-backend") + 1] == "onnx"
+    assert args[args.index("--onnx-model") + 1] == "PP-OCRv5_server_rec"
+    assert args[args.index("--onnx-device") + 1] == "dml"
+    assert args[args.index("--onnx-device-id") + 1] == "1"
+    assert args[args.index("--rec-batch-size") + 1] == "8"
+
+
+def test_paddle_runs_carry_no_onnx_flags(book, tmp_path):
+    path, raw = book
+    config = sync.load_config(path)
+
+    args = sync.command_args(config, config["output"], tmp_path / "cache", None)
+
+    assert args[args.index("--ocr-backend") + 1] == "paddle"
+    assert "--onnx-model" not in args and "--onnx-device" not in args
+
+
+def test_onnx_and_paddle_caches_never_share_a_directory(book, monkeypatch):
+    path, raw = book
+    monkeypatch.setattr(sync, "onnx_identity", lambda config: {
+        "model": "deadbeef", "provider": config.get("onnxDevice", "auto"),
+        "deviceId": 0, "batchSize": config.get("recBatchSize", 16)})
+    paddle = sync.cache_directory(sync.load_config(path))
+
+    raw.update(ocrBackend="onnx", onnxDevice="cpu")
+    write(path, json.dumps(raw, ensure_ascii=False))
+    cpu = sync.cache_directory(sync.load_config(path))
+    raw.update(onnxDevice="dml")
+    write(path, json.dumps(raw, ensure_ascii=False))
+    dml = sync.cache_directory(sync.load_config(path))
+    raw.update(recBatchSize=8)
+    write(path, json.dumps(raw, ensure_ascii=False))
+    smaller = sync.cache_directory(sync.load_config(path))
+
+    assert len({paddle, cpu, dml, smaller}) == 4
+
+
+def test_onnx_dependency_report_requires_onnxruntime(book):
+    assert "onnxruntime" not in sync.dependency_report("paddle")["packages"]
+    report = sync.dependency_report("onnx")
+    assert "onnxruntime" in report["packages"]
+    assert report["backend"] == "onnx"
+
+
+@pytest.mark.parametrize("patch,message", [
+    ({"onnxDevice": "cuda"}, "onnxDevice must be"),
+    ({"onnxDeviceId": -1}, "onnxDeviceId must be"),
+    ({"recBatchSize": 0}, "recBatchSize must be"),
+])
+def test_rejected_onnx_settings(book, patch, message):
+    path, raw = book
+    raw.update(ocrBackend="onnx", **patch)
+    write(path, json.dumps(raw, ensure_ascii=False))
+    with pytest.raises(ValueError, match=message):
+        sync.load_config(path)

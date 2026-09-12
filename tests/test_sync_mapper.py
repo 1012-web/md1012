@@ -32,6 +32,20 @@ def test_markdown_mask_keeps_text_only() -> None:
     assert "p.12" not in visible
 
 
+def test_markdown_mask_drops_the_obsidian_block_identifier() -> None:
+    block = "## 注释 ^tb-c01-h0053"
+    mask = MODULE.markdown_mask(block)
+
+    assert "".join(char for char, keep in zip(block, mask) if keep) == "注释"
+    assert MODULE.normalized_title(block) == "注释"
+
+
+def test_markdown_mask_keeps_a_caret_that_is_not_a_block_identifier() -> None:
+    block = "热力学里写作 2^n 的地方"
+
+    assert all(MODULE.markdown_mask(block)[block.index("2") : block.index("n") + 1])
+
+
 def test_box_to_rect() -> None:
     assert MODULE.box_to_rect([10, 20, 30, 40], 100, 200) == (0.1, 0.1, 0.3, 0.2)
 
@@ -141,14 +155,36 @@ def test_load_model_parts_keeps_blocks_and_visual_lines(tmp_path: Path) -> None:
     assert lines[201] == [(0.1, 0.1, 0.9, 0.2)]
 
 
-def test_chars_from_word_info_uses_ctc_character_columns() -> None:
+def test_chars_from_word_info_scales_by_the_columns_it_was_given() -> None:
     word_info = [20, [["甲", "乙"], ["A", "B"]], [[2, 6], [12, 16]], ["cn", "en&num"]]
 
     chars = MODULE.chars_from_word_info("甲乙AB", word_info, (0.0, 0.2, 1.0, 0.3))
 
     assert [char.value for char in chars] == ["甲", "乙", "A", "B"]
-    assert chars[0].rect == (0.025, 0.2, 0.225, 0.3)
-    assert chars[-1].rect == (0.725, 0.2, 0.925, 0.3)
+    # 首列到末列各外扩半步，铺满整条行框：与 word_info[0] 无关
+    assert chars[0].rect == (0.0, 0.2, 0.222222, 0.3)
+    assert chars[-1].rect == (0.777778, 0.2, 1.0, 0.3)
+
+
+def test_chars_from_word_info_ignores_a_mismatched_valid_column_count() -> None:
+    """PaddleX 回填的有效列数是别行的，长行曾因此只剩开头几个字。"""
+    columns = list(range(2, 132, 5))
+    text = "字" * len(columns)
+    word_info = [24.867956265769557, [list(text)], [columns], ["cn"]]
+
+    chars = MODULE.chars_from_word_info(text, word_info, (0.1, 0.2, 0.9, 0.23))
+
+    assert len(chars) == len(columns)
+    assert chars[0].rect[0] == pytest.approx(0.1)
+    assert chars[-1].rect[2] == pytest.approx(0.9)
+    widths = [char.rect[2] - char.rect[0] for char in chars]
+    assert max(widths) - min(widths) < 1e-5  # 字框按 6 位小数取整，等宽只到这个量级
+
+
+def test_chars_from_word_info_falls_back_to_even_spacing_for_one_character() -> None:
+    chars = MODULE.chars_from_word_info("甲", [7, [["甲"]], [[3]], ["cn"]], (0.1, 0.2, 0.5, 0.3))
+
+    assert [char.rect for char in chars] == [(0.1, 0.2, 0.5, 0.3)]
 
 
 def test_chars_from_word_info_supports_vertical_columns() -> None:
@@ -627,6 +663,87 @@ def test_appended_footnote_characters_do_not_disturb_body_alignment() -> None:
     assert markdown[len(body_text)].rect[1] >= 0.8
 
 
+# --- 悬挂式小标题：标题占左半幅，正文从同一行右半幅接排 ------------------------
+
+
+def ocr_line(text, top, bottom, left, right):
+    """一条识别行：整行的字框共享同一条厚度跨度，沿走向轴均分。"""
+    step = (right - left) / len(text)
+    return [
+        MODULE.OCRChar(value, (left + index * step, top, left + (index + 1) * step, bottom))
+        for index, value in enumerate(text)
+    ]
+
+
+def test_reading_order_puts_a_hanging_heading_before_the_text_beside_it() -> None:
+    body_first = ocr_line("在工业革命发展", 0.294, 0.316, 0.50, 0.85)
+    heading = ocr_line("工人阶级自发的阶级意识", 0.303, 0.335, 0.16, 0.47)
+    body_second = ocr_line("过程中由于大工业", 0.322, 0.344, 0.50, 0.85)
+
+    ordered = MODULE.reading_order_chars(body_first + heading + body_second)
+
+    assert "".join(char.value for char in ordered) == (
+        "工人阶级自发的阶级意识在工业革命发展过程中由于大工业"
+    )
+
+
+def test_reading_order_bands_a_heading_whose_overlap_is_only_a_third_of_a_line() -> None:
+    """下卷第 95 页的真实行框：标题与正文行只重叠正文行高的四成，仍必须并成一条横带。"""
+    body_first = ocr_line("19世纪中叶是英国近代历史上的重要时", 0.3001, 0.3231, 0.423, 0.889)
+    heading = ocr_line("工业革命的完成", 0.3120, 0.3376, 0.187, 0.394)
+    body_second = ocr_line("期。这时，英国已完成了工业革命，正处", 0.3265, 0.3504, 0.423, 0.889)
+
+    ordered = MODULE.reading_order_chars(body_first + heading + body_second)
+
+    assert "".join(char.value for char in ordered).startswith("工业革命的完成19世纪")
+
+
+def test_reading_order_leaves_an_ordinary_page_alone() -> None:
+    chars = (
+        ocr_line("第一行文字", 0.10, 0.13, 0.11, 0.85)
+        + ocr_line("第二行文字", 0.14, 0.17, 0.11, 0.85)
+        + ocr_line("第三行文字", 0.18, 0.21, 0.11, 0.85)
+    )
+
+    assert MODULE.reading_order_chars(chars) == chars
+
+
+def test_reading_order_keeps_one_column_even_when_lines_overlap() -> None:
+    """行框上下略微交叠但左右同栏时不许拆栏，否则整页会被重排。"""
+    chars = ocr_line("上行文字", 0.10, 0.14, 0.11, 0.85) + ocr_line("下行文字", 0.13, 0.17, 0.11, 0.85)
+
+    assert MODULE.reading_order_chars(chars) == chars
+
+
+def test_reading_order_reads_vertical_columns_right_to_left_band_by_band() -> None:
+    right = [MODULE.OCRChar(v, (0.80, 0.1 + i * 0.05, 0.86, 0.15 + i * 0.05)) for i, v in enumerate("右栏")]
+    left = [MODULE.OCRChar(v, (0.70, 0.1 + i * 0.05, 0.76, 0.15 + i * 0.05)) for i, v in enumerate("左栏")]
+
+    ordered = MODULE.reading_order_chars(right + left, "vertical-rl")
+
+    assert "".join(char.value for char in ordered) == "右栏左栏"
+
+
+def test_align_page_maps_a_hanging_heading_that_shares_lines_with_the_body() -> None:
+    heading_text = "工人阶级自发的阶级意识"
+    body_text = "在工业革命发展过程中由于大工业"
+    markdown = [
+        MODULE.VisibleChar(value, index, index + 1, 26, 32)
+        for index, value in enumerate(heading_text + body_text)
+    ]
+    ocr = (
+        ocr_line(body_text[:7], 0.294, 0.316, 0.50, 0.85)
+        + ocr_line(heading_text, 0.303, 0.335, 0.16, 0.47)
+        + ocr_line(body_text[7:], 0.322, 0.344, 0.50, 0.85)
+    )
+
+    mapped = MODULE.align_page(markdown, ocr)
+
+    assert mapped == len(markdown)
+    assert markdown[0].rect[0] == pytest.approx(0.16)
+    assert markdown[len(heading_text)].rect[0] == pytest.approx(0.50)
+
+
 # --- det-v2：短脚注的兜底与投影切行 -------------------------------------------
 
 
@@ -744,3 +861,184 @@ def test_detection_cache_key_changes_with_the_algorithm_version(tmp_path: Path) 
     # det-v1 留下的空结果不能再被读回来
     MODULE.write_text(tmp_path / "lines" / f"p0014-{previous}.json", "[]")
     assert supplementer.lines_for(14, [footnote], [], lambda: blank_image()) == [footnote.rect]
+
+
+# --- 目录页的引导点 -----------------------------------------------------------
+
+
+def dot_leader_entry(title, dots, number, left, right, top=0.2, bottom=0.23):
+    """一条目录行的识别结果：标题、一长串引导点、页码。"""
+    return ocr_line(title + "." * dots + number, top, bottom, left, right)
+
+
+def test_dot_leaders_collapse_to_one_unit_on_both_sides() -> None:
+    units, owners = MODULE.normalized_chars(
+        [MODULE.OCRChar(value, (0.1, 0.2, 0.2, 0.3)) for value in "甲……乙"]
+    )
+
+    # Markdown 的「……」经 NFKC 展开成六个句点，折叠后只剩一个
+    assert units == "甲.乙"
+    # 折叠出来的那一个单元把两个「…」都挂着，对上了两个都能拿到坐标
+    assert [len(group) for group in owners] == [1, 2, 1]
+
+
+def test_a_single_middle_dot_is_never_collapsed() -> None:
+    units, owners = MODULE.normalized_chars(
+        [MODULE.OCRChar(value, (0.1, 0.2, 0.2, 0.3)) for value in "发展·宪章"]
+    )
+
+    assert units == "发展·宪章"
+    assert all(len(group) == 1 for group in owners)
+
+
+def test_dot_leader_alignment_survives_a_page_number_after_the_dots() -> None:
+    markdown = [
+        MODULE.VisibleChar(value, index, index + 1, 3, 5)
+        for index, value in enumerate("第一节英国工业革命……23")
+    ]
+    # 纸面上引导点有三十个，Markdown 只写两个「……」
+    ocr = dot_leader_entry("第一节英国工业革命", 30, "23", 0.15, 0.85)
+
+    mapped = MODULE.align_page(markdown, ocr)
+
+    assert mapped == len(markdown)
+    assert [char.value for char in markdown if char.rect is None] == []
+    # 页码「23」拿到的是页码本身的框，没有被前面的点挤偏
+    assert markdown[-1].rect[0] > markdown[-3].rect[0]
+
+
+def test_collapsed_dot_run_gets_the_whole_leader_rectangle() -> None:
+    markdown = [MODULE.VisibleChar(value, index, index + 1, 3, 5)
+                for index, value in enumerate("甲……9")]
+    ocr = dot_leader_entry("甲", 10, "9", 0.10, 0.90)
+
+    MODULE.align_page(markdown, ocr)
+
+    leader = [char.rect for char in markdown if char.value == "…"]
+    assert len(leader) == 2 and leader[0] == leader[1]
+    # 整串点的外接框，不是头一个点的小框
+    assert leader[0][2] - leader[0][0] == pytest.approx(0.8 * 10 / 12, abs=1e-6)
+
+
+# --- ONNX Runtime 识别后端 -----------------------------------------------------
+
+
+class FakeOnnxRuntime:
+    """够用的 onnxruntime 替身：只回答「有哪些 provider」。"""
+
+    def __init__(self, providers):
+        self._providers = providers
+
+    def get_available_providers(self):
+        return list(self._providers)
+
+
+def test_both_backends_place_a_character_identically_for_the_same_columns() -> None:
+    values = list("甲乙丙")
+    columns = [2.0, 5.0, 8.0]
+    line = (0.1, 0.3, 0.7, 0.34)
+    # PaddleOCR 的 word_info 拆成词组，ONNX 直接给平铺的列号，两条路必须落到同一批框上
+    word_info = [40, [values], [columns], ["cn"]]
+
+    from_paddle = MODULE.chars_from_word_info("甲乙丙", word_info, line)
+    from_onnx = MODULE.chars_from_columns(values, columns, line)
+
+    assert [char.rect for char in from_paddle] == [char.rect for char in from_onnx]
+    assert [char.value for char in from_onnx] == values
+
+
+def test_ctc_decoding_reports_the_column_each_character_was_decoded_at() -> None:
+    numpy = pytest.importorskip("numpy")
+    charset = ["blank", "甲", "乙"]
+    # 时间轴: blank, 甲, 甲(重复), blank, 乙
+    probabilities = numpy.array([
+        [0.9, 0.05, 0.05],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.9, 0.05, 0.05],
+        [0.1, 0.1, 0.8],
+    ])
+
+    values, columns = MODULE.onnx_ctc_decode(probabilities, charset)
+
+    assert values == ["甲", "乙"]
+    assert columns == [1.0, 4.0]
+
+
+def test_device_choice_prefers_the_adapter_with_the_most_dedicated_memory(monkeypatch) -> None:
+    monkeypatch.setattr(MODULE, "dxgi_adapters", lambda: [
+        (0, "Intel(R) Graphics", 128 * 1024 ** 2),
+        (1, "AMD Radeon RX 9070 GRE", 12 * 1024 ** 3),
+    ])
+    runtime = FakeOnnxRuntime(["DmlExecutionProvider", "CPUExecutionProvider"])
+
+    assert MODULE.resolve_onnx_device(runtime, "auto", None) == ("dml", 1, "AMD Radeon RX 9070 GRE")
+    # 明写 device id 就照办，哪怕那是核显
+    assert MODULE.resolve_onnx_device(runtime, "dml", 0) == ("dml", 0, "Intel(R) Graphics")
+    assert MODULE.resolve_onnx_device(runtime, "cpu", None) == ("cpu", 0, "cpu")
+
+
+def test_auto_falls_back_to_cpu_without_a_discrete_adapter(monkeypatch) -> None:
+    monkeypatch.setattr(MODULE, "dxgi_adapters", lambda: [(0, "Intel(R) Graphics", 128 * 1024 ** 2)])
+    runtime = FakeOnnxRuntime(["DmlExecutionProvider", "CPUExecutionProvider"])
+
+    provider, _, name = MODULE.resolve_onnx_device(runtime, "auto", None)
+
+    assert provider == "cpu" and "no discrete adapter" in name
+
+
+def test_auto_falls_back_to_cpu_without_directml() -> None:
+    runtime = FakeOnnxRuntime(["CPUExecutionProvider"])
+
+    assert MODULE.resolve_onnx_device(runtime, "auto", None)[0] == "cpu"
+    with pytest.raises(RuntimeError, match="DmlExecutionProvider is unavailable"):
+        MODULE.resolve_onnx_device(runtime, "dml", None)
+
+
+def test_a_missing_onnx_model_names_the_file_it_looked_for(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="inference.onnx"):
+        MODULE.onnx_model_directory(str(tmp_path))
+
+
+def test_onnx_charset_puts_blank_first_and_space_last(tmp_path: Path) -> None:
+    pytest.importorskip("yaml")
+    (tmp_path / "inference.yml").write_text(
+        "PostProcess:\n  character_dict:\n    - 甲\n    - 乙\n", encoding="utf-8"
+    )
+
+    assert MODULE.onnx_charset(tmp_path) == ["blank", "甲", "乙", " "]
+
+
+def test_onnx_resize_keeps_the_paddle_geometry() -> None:
+    numpy = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    # 高 24、宽 240 的行图：宽高比 10 大于基准 320/48，目标宽按自身比例算成 480
+    prepared = MODULE.onnx_resize_normalize(numpy.zeros((24, 240, 3), dtype=numpy.uint8))
+
+    assert prepared.shape == (3, 48, 480)
+    # 归一化后全零输入变成 -1
+    assert prepared.min() == pytest.approx(-1.0)
+
+
+def test_line_crops_pad_the_box_and_report_what_was_cut(monkeypatch) -> None:
+    numpy = pytest.importorskip("numpy")
+    image = numpy.zeros((200, 400, 3), dtype=numpy.uint8)
+
+    crops, rects = MODULE.line_crops(image, [(0.25, 0.5, 0.75, 0.6)], "horizontal-tb")
+
+    # 左右各让出 4 像素：100-4 .. 300+4，纵向 100-4 .. 120+4
+    assert crops[0].shape[:2] == (28, 208)
+    assert rects[0] == (96 / 400, 96 / 200, 304 / 400, 124 / 200)
+
+
+def test_onnx_cache_scope_separates_model_provider_and_batch() -> None:
+    engine = MODULE.OnnxCharacterOCR.__new__(MODULE.OnnxCharacterOCR)
+    engine.model_directory = Path("C:/x/PP-OCRv5_server_rec_onnx")
+    engine.provider = "dml"
+    engine.batch_size = 8
+    engine.device_name = "AMD Radeon RX 9070 GRE"
+
+    assert engine.cache_scope == "onnx-PP-OCRv5_server_rec_onnx-dml-b8"
+    # 收尾行要能看出活派给了哪块卡
+    assert engine.describe() == "dml:AMD Radeon RX 9070 GRE"
+    assert MODULE.OnnxCharacterOCR.backend == "onnx"
