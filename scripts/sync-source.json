@@ -1,9 +1,9 @@
 {
-  "version": "0.4.1-skill.1",
+  "version": "0.4.2-skill.1",
   "source": "scripts/sync_mapper.py (this skill is the sole maintainer since 2026-09-11; the vault-side generate_map.py is retired)",
   "sourceProject": "313 history vault",
-  "snapshotDate": "2026-09-12",
-  "sha256": "27ef96eddfa8323d626354b1b3e8f8f42e27e3d5ae350c469eb05a910c2d6ded",
+  "snapshotDate": "2026-09-13",
+  "sha256": "1f02734ec9afb7900f4371a913906a3559c226b7ec2ad17286ddd06261952dd3",
   "changes": [
     "annotation and wikilink masking including multiline notes",
     "explicit Markdown input filenames",
@@ -31,7 +31,8 @@
     "DirectML adapter selection enumerates DXGI and takes the adapter with the most dedicated video memory instead of DirectML's default device 0, which is commonly the integrated GPU and an order of magnitude slower; auto falls back to CPU when no discrete adapter is found, and the provider and adapter name are printed on the mapper's closing line",
     "the OCR cache is separated per backend: load_or_run_ocr honours an engine-supplied cache_scope (onnx-<model>-<provider>-b<batch>) and pdf_sync folds the backend name, the ONNX model file hash, the resolved provider, the adapter index and the batch size into the cache identity",
     "line recovery now also runs for the ONNX backend: its detection model is PaddleOCR's either way, so a footnote or a table of contents keeps its recovered line boxes; Tesseract and Kraken still skip it to stay installable without PaddlePaddle",
-    "dot leaders are collapsed before alignment: a run of two or more dot characters (. and the middle-dot family) becomes one unit on both sides, because Markdown writes two ellipses that NFKC expands into six periods while the page carries dozens of printed dots, and the surplus used to push the page number after them out of the alignment window; a single middle dot is left alone since it is a real separator in Chinese titles, and the collapsed unit carries every source character in the run so each one still receives the leader's bounding box"
+    "dot leaders are collapsed before alignment: a run of two or more dot characters (. and the middle-dot family) becomes one unit on both sides, because Markdown writes two ellipses that NFKC expands into six periods while the page carries dozens of printed dots, and the surplus used to push the page number after them out of the alignment window; a single middle dot is left alone since it is a real separator in Chinese titles, and the collapsed unit carries every source character in the run so each one still receives the leader's bounding box",
+    "the ONNX recognition backend defaults to PP-OCRv6_medium_rec and reads its character dictionary AND its input geometry from the model directory's inference.yml (PostProcess.character_dict plus PreProcess RecResizeImg.image_shape) instead of assuming PP-OCRv5's 3x48x320, with the yml checked against the static dimensions the ONNX graph declares so a mismatched pair of files fails loudly instead of silently rescaling every line; the Paddle backend still defaults to PP-OCRv5_mobile_rec because that is the only Paddle-format weight kept on disk for the fallback path. Measured on world-ancient-lower physical pages 41-60 (658 lines, batch 16, DirectML on an RX 9070 GRE, two runs, faster kept): character accuracy 99.64% -> 99.85% and 11.24s -> 13.83s for the 20 pages; DirectML and CPU agree line for line (658/658) on v6, and DirectML takes 186 of the graph's 188 nodes"
   ],
   "compatibility": "MinerU PDF Sync sidecar schema version 1",
   "maintenance": "Bundled snapshot. Update deliberately with mapper tests and sidecar compatibility checks; never overwrite a local plugin automatically."

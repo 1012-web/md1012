@@ -106,9 +106,12 @@ ONNX 专有配置项：
 - **v6 medium 比 v5 mobile 少犯约六成错**（错误率 0.36% → 0.15%），20 页里 15 页更准、3 页持平、1 页退 0.11 个百分点。代价是慢 23%（每页 0.562 s → 0.692 s）。
 - **提速全部来自 DirectML**：v6 medium 在 CPU 上要 7.5 s 一页，DirectML 上 0.69 s，快 10.9 倍。没有独显就别用 medium，退回 v5 mobile。
 - DirectML 与 CPU 的 v6 结果**逐行 100% 相同**（658/658），不存在精度打折。
-- DirectML 接下 v6 图里 186 个节点中的 184 个，落在 CPU 上的 2 个（一个 Slice、一个 Concat）是 ORT 主动判定「CPU 更快」的 force fallback，不是不支持（v5 mobile 同理，301 个节点里 8 个落 CPU）。
+- DirectML 接下 v6 图里 188 个节点中的 186 个，落在 CPU 上的 2 个（一个 Slice、一个 Concat）是 ORT 主动判定「CPU 更快」的 force fallback，不是算子不支持（v5 mobile 同理，301 个节点里 8 个落 CPU）。查法是把 `SessionOptions.log_severity_level` 开到 0，读 ORT 的节点放置日志——`get_providers()` 只说注册了哪些 provider，不说图实际落在谁身上。
 - 批量会轻微改变结果：v6 在 batch 16 与 batch 1 之间有 14/658 行不同（补零宽度不同所致），但两档准确率只差 0.01 个百分点。生产用 batch 16。
 - 脚注小字另抽两页看（world-ancient-lower 物理页 81、13，行框取流水线自己检测出来的那批）：p81 v5 98.99% → v6 99.66%（v5 漏掉「教的学问」四字并串出一个杂字），p13 两者都 100%。注意 p81 的「答案」本身是 MinerU 抽出来的文本，把「彦悰」错成「彦惊」，v6 读对了反而被算成一个错——v6 的实际差距比表上更大。
+- v6 偶尔把全角括号读成半角（p13 的「（在今内蒙古…」）。标点不计入上面的准确率，但会进对齐；实测 8 本覆盖率没有因此变差。
+
+本机 `~/.paddlex/official_models/` 里**在用**的是三份：`PP-OCRv6_medium_rec_onnx`（ONNX 识别）、`PP-OCRv5_mobile_det`（补行框检测）、`PP-OCRv5_mobile_rec`（Paddle 后端回退）。`PP-OCRv5_mobile_rec_onnx`、`PP-OCRv5_server_rec_onnx`、`PP-OCRv5_server_rec` 已删（省 179 MB）；要回头跑 v5 的 ONNX 得先重新拉一次，命令见上，报错信息里也写了。
 
 依赖：Windows 装 `onnxruntime-directml`，其他平台装 `onnxruntime`，见 `scripts/sync-requirements.txt`；`pdf_sync.py check` 在 `ocrBackend=onnx` 时把 onnxruntime 一并列进依赖探测。**PaddleOCR 仍然必装**——补行框用的文本检测模型是 PaddleOCR 的，ONNX 后端只替换识别这一步。
 
