@@ -45,7 +45,7 @@ check 只检查本地输入和依赖元数据，不导入 OCR 引擎、不下载
   "pageRangeOffsets": ["01-正文.md|423-893|26"],
   "output": "90-工作流/MinerU联动/example-book",
   "ocrBackend": "onnx",
-  "onnxModel": "PP-OCRv5_mobile_rec",
+  "onnxModel": "PP-OCRv6_medium_rec",
   "onnxDevice": "auto",
   "writingMode": "horizontal-tb",
   "recognitionModel": "PP-OCRv5_mobile_rec",
@@ -72,29 +72,43 @@ MinerU 的 model JSON 只对正文给 `ocr_text` 视觉行框，页脚脚注（`
 
 入口启用 PaddleOCR 与 ONNX Runtime 两种识别后端，二者的字框口径已验证等同。底层快照虽保留 Tesseract/Kraken 代码，它们的按行分配字框没有完成精确能力验证，禁止通过此入口交付为精确结果。竖排与古籍必须先核对识别顺序和模型表现，不能用横排教材的验收代替。
 
-`ocrBackend` 选 `paddle` 或 `onnx`，其余配置项都一样。两者跑的是同一份 PP-OCRv5 权重（ONNX 那份由 `paddlex --paddle2onnx` 导出，放在 `~/.paddlex/official_models/<模型名>_onnx/`），共用同一段裁图代码、同一套「CTC 列区间→字框」换算，识别结果逐字相同：在 world-ancient-lower 物理页 41–60 上逐行比对（batch=1，mobile 模型），683 行**字符串全等**，每个字框四个坐标的**最大绝对差为 0**，CPU 与 DirectML 两条路都是。差别只在速度与依赖。
+`ocrBackend` 选 `paddle` 或 `onnx`，其余配置项都一样。两者共用同一段裁图代码、同一套「CTC 列区间→字框」换算，**喂同一份权重时识别结果逐字相同**：在 world-ancient-lower 物理页 41–60 上逐行比对（batch=1，PP-OCRv5 mobile），683 行**字符串全等**，每个字框四个坐标的**最大绝对差为 0**，CPU 与 DirectML 两条路都是。
+
+两个后端的**默认模型现在不是同一份**：ONNX 默认 `PP-OCRv6_medium_rec`（DirectML 上跑得动的最好的那档），Paddle 后端仍默认 `PP-OCRv5_mobile_rec`。这么分是因为 Paddle 路径是「显卡不灵时还能跑」的回退，本机只留着 v5 mobile 那一份 Paddle 格式权重，换默认值会让回退路径去联网下载。所以换后端跑同一本书，文字会有细微出入（不是坐标口径变了，是模型变了）；要逐字对照两个后端，得显式把 `onnxModel` 和 `recognitionModel` 设成同一个模型。
+
+模型目录都从 PaddleX 官方源取：`official_models.get_model_path("<模型名>", model_formats=["onnx"])` 落到 `~/.paddlex/official_models/<模型名>_onnx/`，里面是 `inference.onnx` 加 `inference.yml`。**字典和输入规格一律从该目录的 `inference.yml` 读，不按模型名写死**：字典取 `PostProcess.character_dict`（v5 是 18383 字、v6 是 18708 字，顺序也不同），输入规格取 `PreProcess.transform_ops` 里 `RecResizeImg.image_shape`（v5 与 v6 眼下都是 3×48×320，写死就等于赌下一代不改高度）。会话建好后还拿 ONNX 图里声明的静态维（通道与高）和 yml 对一次，对不上直接报错——两份文件是分开下载的，配错对不会有任何症状，只会安静地按错高度缩放、出一整本乱码。
 
 ONNX 专有配置项：
 
 | 配置项 | 命令行 | 取值 | 说明 |
 |---|---|---|---|
-| `onnxModel` 模型 | `--onnx-model` | `PP-OCRv5_mobile_rec`、`PP-OCRv5_server_rec`，或含 `inference.onnx` 的目录路径 | 默认 mobile |
+| `onnxModel` 模型 | `--onnx-model` | `PP-OCRv6_medium_rec`（默认）、`PP-OCRv5_mobile_rec`、`PP-OCRv5_server_rec`，或含 `inference.onnx` 的目录路径 | 名字会映射到 `<模型名>_onnx` 目录 |
 | `onnxDevice` 设备 | `--onnx-device` | `auto`（默认）、`dml`、`cpu` | `auto` 按 DXGI 枚举挑专用显存最大且不小于 1 GiB 的适配器，挑不到就退回 CPU；`dml` 强制走 DirectML，枚举不到独显也不退回 |
 | `onnxDeviceId` 适配器号 | `--onnx-device-id` | 非负整数 | 显式指定 DXGI 适配器序号，覆盖自动挑选 |
 | `recBatchSize` 批量 | `--rec-batch-size` | 1–256，默认 16 | 两个后端共用 |
 
 **设备选择要留神**：DirectML 的 `device_id` 就是 DXGI 适配器序号，而 0 号往往是核显。本机实测 0 号是 Intel 核显、1 号才是 RX 9070 GRE；照 DirectML 的默认取 0 号，速度比独显慢一个量级。所以 `auto` 与 `dml` 都按专用显存挑卡，只有显式给了 `--onnx-device-id` 才照办。实际用到的 provider 与显卡名写在 mapper 收尾行：`backend=onnx device=dml:AMD Radeon RX 9070 GRE pages=… mapped=…`。
 
-实测（world-ancient-lower 物理页 41–60，683 行，renderScale 2.0，batch 16，只计识别、不含行框检测）：
+实测（world-ancient-lower 物理页 41–60，MinerU 的 658 条 `ocr_text` 行，renderScale 2.0，只计识别、不含行框检测；每个组合跑两遍取快者）。准确率是**字符准确率** `1 - 编辑距离 / 答案字数`，答案取 `03-正文.md` 按页锚切出的该页正文，两侧都只留 CJK 与字母数字：
 
-| 后端 / 模型 / 设备 | 20 页耗时 | 每页 | 对齐覆盖率 |
-|---|---|---|---|
-| paddle / mobile / CPU（oneDNN，9 线程） | 81.8 s | 4.09 s | 99.83% |
-| onnx / mobile / CPU | 88.5 s | 4.42 s | 99.83% |
-| onnx / mobile / DirectML（RX 9070 GRE） | 10.3 s | 0.52 s | 99.83% |
-| onnx / server / DirectML（RX 9070 GRE） | 10.6 s | 0.53 s | 99.80% |
+| 模型 / 设备 | batch | 20 页耗时 | 每页 | 字符准确率 | 最差页 |
+|---|---|---|---|---|---|
+| PP-OCRv5_mobile / DirectML（RX 9070 GRE） | 16 | 11.24 s | 0.562 s | 99.64% | 98.74% |
+| **PP-OCRv6_medium / DirectML（RX 9070 GRE）** | 16 | 13.83 s | 0.692 s | **99.85%** | 99.43% |
+| PP-OCRv5_mobile / DirectML | 1 | 19.70 s | 0.985 s | 99.64% | 98.74% |
+| PP-OCRv6_medium / DirectML | 1 | 23.74 s | 1.187 s | 99.86% | 99.54% |
+| PP-OCRv6_medium / CPU | 16 | 150.43 s | 7.521 s | 99.85% | 99.43% |
 
-要点：**提速全部来自 DirectML**，ONNX 在 CPU 上并不比 PaddlePaddle 的 oneDNN 路径快（batch=1 时 ONNX 快三四倍，但生产用的是 batch 16，两者持平）。DirectML 上 server 模型几乎不比 mobile 慢，显存足够时可以直接上 server。
+更早一轮（同样 20 页，batch 16）的 v5 数据留作对比：paddle / mobile / CPU（oneDNN，9 线程）81.8 s、onnx / mobile / CPU 88.5 s、onnx / server / DirectML 10.6 s。
+
+要点：
+
+- **v6 medium 比 v5 mobile 少犯约六成错**（错误率 0.36% → 0.15%），20 页里 15 页更准、3 页持平、1 页退 0.11 个百分点。代价是慢 23%（每页 0.562 s → 0.692 s）。
+- **提速全部来自 DirectML**：v6 medium 在 CPU 上要 7.5 s 一页，DirectML 上 0.69 s，快 10.9 倍。没有独显就别用 medium，退回 v5 mobile。
+- DirectML 与 CPU 的 v6 结果**逐行 100% 相同**（658/658），不存在精度打折。
+- DirectML 接下 v6 图里 186 个节点中的 184 个，落在 CPU 上的 2 个（一个 Slice、一个 Concat）是 ORT 主动判定「CPU 更快」的 force fallback，不是不支持（v5 mobile 同理，301 个节点里 8 个落 CPU）。
+- 批量会轻微改变结果：v6 在 batch 16 与 batch 1 之间有 14/658 行不同（补零宽度不同所致），但两档准确率只差 0.01 个百分点。生产用 batch 16。
+- 脚注小字另抽两页看（world-ancient-lower 物理页 81、13，行框取流水线自己检测出来的那批）：p81 v5 98.99% → v6 99.66%（v5 漏掉「教的学问」四字并串出一个杂字），p13 两者都 100%。注意 p81 的「答案」本身是 MinerU 抽出来的文本，把「彦悰」错成「彦惊」，v6 读对了反而被算成一个错——v6 的实际差距比表上更大。
 
 依赖：Windows 装 `onnxruntime-directml`，其他平台装 `onnxruntime`，见 `scripts/sync-requirements.txt`；`pdf_sync.py check` 在 `ocrBackend=onnx` 时把 onnxruntime 一并列进依赖探测。**PaddleOCR 仍然必装**——补行框用的文本检测模型是 PaddleOCR 的，ONNX 后端只替换识别这一步。
 

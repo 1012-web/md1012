@@ -981,7 +981,8 @@ def onnx_model_directory(name: str) -> Path:
     if not (directory / "inference.onnx").is_file():
         raise RuntimeError(
             f"ONNX recognition model not found: {directory}\\inference.onnx. "
-            f"Export it with paddlex --paddle2onnx, or pass --onnx-model with a directory path."
+            f"Fetch it with paddlex official_models.get_model_path(name, model_formats=['onnx']), "
+            f"or pass --onnx-model with a directory path."
         )
     return directory
 
