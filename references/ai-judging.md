@@ -1,0 +1,51 @@
+# AI 看原图判定 OCR 疑字
+
+逐字映射里「两家读法不一致」的字（MinerU 与 PaddleOCR 读得不同）是错字最集中的地方。本流程让一个
+看得懂图的模型逐个看原书图像，判定哪家对、还是都不对，再按规则改正文、写校勘账本。只在站长要求时做。
+
+## 流程
+
+1. **截图**：`python -X utf8 scripts/doubt_crops.py "<书名>" <个数> <输出目录>`。从笔记库
+   `90-工作流/校勘记/<书名> OCR疑字.md` 取前 N 个「两家读法不一致」的字，按逐字映射截原图（整行附近 + 单字放大），
+   每 5 个拼一张 `sheet-N.png`，写 `manifest.json`。只读笔记库。
+2. **判定**：交给**全新的子代理**做（上下文干净，花费最省，且能报准 token 用量）。提示词要点：
+   - **以原图上印的字为准，上下文只作辅助**。反例：曾凭上下文把原书印的「觶」猜成「觿」，错了。
+   - 结论四选一：A MinerU 对｜B PaddleOCR 对｜C 都不对（写出原书的字）｜D 看不清。每条给把握「高/低」与一句依据。
+   - 原书是繁体、异体或类推简化字形时写 `variant: {printed: 原书字形, standard: 规范字}`；原书字形不在 Unicode 里时 printed 写部件描述式（如 `⿰口厌`）。
+   - 原书本身印错（照录下来文意不通）时，结论仍是 A，另写 `misprint: 疑当作的字`。
+   - 输出 `judgement.json`：`[{n, page, minerU, ocr, verdict, correct, confidence, reason, variant?, misprint?}]`，另写一份 Markdown 表给人看。
+   - 看不清时才单独打开单字放大图，省额度。
+3. **核对**：先把表给站长抽查（建议挑两家都不对的、把握低的几条对原图），准确度认可后再执行。
+4. **执行**：在站长的 Obsidian 里经命令行 eval 跑 `scripts/apply_judgement.js`（需要笔记1012 插件）：
+   ```
+   window.__judgement = { dir: "<输出目录>", variants: "normalize", by: "AI 看原图判定" };
+   eval(require("fs").readFileSync("<skill>/scripts/apply_judgement.js", "utf8"))
+   ```
+   结果在 `window.__judgementResult`。
+
+## 执行规则（站长 2026-09-24 定）
+
+| 判定 | 处理 |
+|---|---|
+| 把握低，或 D | 不动，留给站长 |
+| A（MinerU 对） | 认可此字，账本记判定者与依据，不再标为疑字 |
+| A 且 `misprint`（原书印错） | **照录原书，另出校记**：正文不改，校勘记「照录原书的校记」一节写「原书作X，疑为Y之误」 |
+| B / C | 改成原书的字；校勘记该条的「判定与依据」写判定者与依据 |
+| 有 `variant` | 按选项 `variants`：`normalize`（默认）正文用规范字，校记「原书作𫩫（嚈的异体），改作规范字」；`keep` 正文用原书字形，校记「规范字作嚈」 |
+
+改字前核对位置上仍是 MinerU 那个字，不是就跳过（`mismatched`）。所有判定都记「判定者」，与站长手动的区分开，读正文的人与 AI 都能分辨哪些字经人核过。
+
+## 异体字
+
+- 字形收进 Unicode 就能直接打、直接存（例：嚈的类推简化 𫩫 = U+2BA6B，扩展 E 区）。查码位：Unicode Unihan 数据库 `https://www.unicode.org/cgi-bin/GetUnihanData.pl?codepoint=<码位>` 的 kSimplifiedVariant 等字段，或字统网 zi.tools。
+- 显示要字体支持扩展区：Windows 自带「宋体-ExtB」（simsunb.ttf）含 𫩫，Obsidian 会自动回退使用。
+- 没收进 Unicode 的字形只能写部件描述式（`⿰口厌`），正文用规范字、校记里写描述式。
+- `keep` 的代价：正文搜「嚈哒」搜不到「𫩫哒」。要保留字形又要能搜，用 `normalize`，字形留在校记里。
+
+## 花费参考
+
+古代史编下卷前 30 个两家不一致的字：子代理 113,557 token、48 次工具调用、约 5 分钟；本周额度增量不到 1%（Max 方案）。
+每字约 3,800 token，主要花在看图；每张图多拼几个字、少单独开放大图可以省。
+
+判定结果（30 个）：MinerU 对 20、PaddleOCR 对 3、都不对 7；PaddleOCR 常把「己」读成「已」、「讧」读成「订/江」、连接号读成「一」，
+所以「采用 PaddleOCR 读法」很少是对的，都不对的（如「犁镰」实为「犁镵」、「哎哒」实为「𫩫哒」）要按原图改。
