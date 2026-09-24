@@ -125,6 +125,43 @@ def test_find_copies_matches_identical_bytes_only(tmp_path: Path) -> None:
     assert MODULE.find_copies(source, storage) == [str(storage / "A" / "《书》.pdf")]
 
 
+def test_page_listed_without_characters_loses_its_old_text(tmp_path: Path) -> None:
+    source = tmp_path / "书.pdf"
+    make_pdf(source)
+    output = tmp_path / "校订版.pdf"
+
+    report = MODULE.build(source, {**SPEC, "pages": {"2": []}}, output)
+
+    assert text_of(output, 2) == ""
+    assert text_of(output, 1) == "旧的错字"
+    assert report["pagesRewritten"] == 1
+
+
+def test_incremental_build_rewrites_only_listed_pages(tmp_path: Path) -> None:
+    source = tmp_path / "书.pdf"
+    make_pdf(source)
+    first = tmp_path / "第一次.pdf"
+    MODULE.build(source, SPEC, first)
+    second = tmp_path / "第二次.pdf"
+
+    MODULE.build(first, {**SPEC, "pages": {"1": [["改", 0.1, 0.3, 0.2, 0.45]]}}, second)
+
+    assert text_of(second, 1) == "改"
+    assert text_of(second, 2) == "封面文字"
+
+
+def test_replace_without_backup(tmp_path: Path) -> None:
+    target = tmp_path / "校订版.pdf"
+    target.write_bytes(b"%PDF-v1")
+    source = tmp_path / "新.pdf"
+    source.write_bytes(b"%PDF-v2")
+
+    result = MODULE.replace(target, source, None, hashlib.sha256(b"%PDF-v1").hexdigest())
+
+    assert result["backup"] is None
+    assert target.read_bytes() == b"%PDF-v2"
+
+
 def test_spec_loads_gzip_and_rejects_other_versions(tmp_path: Path) -> None:
     import gzip
 

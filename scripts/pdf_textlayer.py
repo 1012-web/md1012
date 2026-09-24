@@ -177,11 +177,12 @@ def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) ->
         number = index + 1
         result = PageResult(page=number)
         page = work[index]
-        chars = pages.get(str(number), [])
-        if not chars:
-            # 清单里没有这页（封面、插图页、没进正文的页）：原有文字层照留，不删也不写
+        if str(number) not in pages:
+            # 清单里没有这页（封面、插图页、没进正文的页，或增量同步时没改的页）：原有文字层照留
             results.append(result)
             continue
+        # 列在清单里但一个字也没有：这页的正文都删了，旧文字层删掉、不写新的
+        chars = pages[str(number)]
         removed, ratio = remove_text_layer(page, verify)
         if removed and ratio > VERIFY_TOLERANCE:
             # 那页的字本来就看得见（不是扫描图上的隐形层）：换回原页，不动它
@@ -193,8 +194,9 @@ def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) ->
         else:
             result.removed_old = removed
             result.written = write_text_layer(page, chars, fonts)
-            expected = comparable("".join(item[0] for item in chars))
-            result.extracted_match = round(match_ratio(expected, comparable(page.get_text("text"))), 4)
+            if chars:
+                expected = comparable("".join(item[0] for item in chars))
+                result.extracted_match = round(match_ratio(expected, comparable(page.get_text("text"))), 4)
         results.append(result)
     stamp = datetime.now().strftime("%Y-%m-%d")
     metadata = dict(work.metadata or {})
@@ -219,7 +221,8 @@ def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) ->
         "outputBytes": output.stat().st_size,
         "pages": len(results),
         "pagesWithText": sum(1 for item in results if item.written),
-        "pagesUntouched": sum(1 for item in results if not item.written and not item.kept_old_layer),
+        "pagesRewritten": sum(1 for item in results if str(item.page) in pages and not item.kept_old_layer),
+        "pagesUntouched": sum(1 for item in results if str(item.page) not in pages),
         "charactersWritten": sum(item.written for item in results),
         "pagesKeptOldLayer": [item.page for item in results if item.kept_old_layer],
         "lowestMatch": min(scored) if scored else None,
@@ -247,20 +250,25 @@ def find_copies(pdf: Path, root: Path) -> list[str]:
     return found
 
 
-def replace(target: Path, source: Path, backup_dir: Path, expect_sha256: str) -> dict[str, Any]:
-    """先确认目标还是当初那份原件，备份到 backup_dir，再原子替换。"""
+def replace(target: Path, source: Path, backup_dir: Path | None, expect_sha256: str) -> dict[str, Any]:
+    """先确认目标还是预期的那份，备份到 backup_dir（为 None 时不备份），再原子替换。
+
+    不备份只用于自动同步：那时目标是插件上次自己写进去的文件，原件在第一次覆盖时已备份。
+    """
     current = sha256(target)
     if current != expect_sha256:
         raise ValueError(f"target changed since the corrected PDF was built (sha256 {current[:12]} != {expect_sha256[:12]})")
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / f"{target.stem}.{datetime.now().strftime('%Y%m%dT%H%M%S')}{target.suffix}"
-    shutil.copy2(target, backup)
-    if sha256(backup) != current:
-        raise RuntimeError("backup copy does not match the original; target left untouched")
+    backup: Path | None = None
+    if backup_dir is not None:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f"{target.stem}.{datetime.now().strftime('%Y%m%dT%H%M%S')}{target.suffix}"
+        shutil.copy2(target, backup)
+        if sha256(backup) != current:
+            raise RuntimeError("backup copy does not match the original; target left untouched")
     temporary = target.with_name(target.name + ".note1012-tmp")
     shutil.copyfile(source, temporary)
     os.replace(temporary, target)
-    return {"target": str(target), "backup": str(backup), "backupSha256": current, "newSha256": sha256(target)}
+    return {"target": str(target), "backup": str(backup) if backup else None, "backupSha256": current, "newSha256": sha256(target)}
 
 
 def write_report(path: Path, report: dict[str, Any]) -> None:
@@ -283,7 +291,8 @@ def main() -> None:
     r = sub.add_parser("replace")
     r.add_argument("--target", type=Path, required=True)
     r.add_argument("--source", type=Path, required=True)
-    r.add_argument("--backup-dir", type=Path, required=True)
+    r.add_argument("--backup-dir", type=Path)
+    r.add_argument("--no-backup", action="store_true", help="automatic sync only: the target is a file this tool wrote earlier")
     r.add_argument("--expect-sha256", required=True)
     r.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -298,7 +307,9 @@ def main() -> None:
         copies = find_copies(args.pdf, args.search_root.expanduser())
         print("COPIES " + json.dumps(copies, ensure_ascii=True))
     else:
-        report = replace(args.target, args.source, args.backup_dir, args.expect_sha256)
+        if not args.no_backup and args.backup_dir is None:
+            parser.error("replace needs --backup-dir unless --no-backup is given")
+        report = replace(args.target, args.source, None if args.no_backup else args.backup_dir, args.expect_sha256)
         if args.report:
             write_report(args.report, report)
         print("REPLACED " + json.dumps(report, ensure_ascii=True))
