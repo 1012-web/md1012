@@ -11,7 +11,7 @@ description: 通过 MinerU 精准解析 API 获取 PDF 解析产物，并把输�
 
 - 普通转换：PDF 预检 → 确定 OCR 路线 → 获取或复用 MinerU 产物 → 审计与重建 → 核对标题、页码、脚注 → 按章/节拆分 → 校验与 diff → 文件交付。
 - 逐字模式：普通转换完成并确定最终 Markdown（已有成品直接复用）→ 读取 [references/character-sync.md](references/character-sync.md) → 使用随 skill 提供的映射入口。默认只交付文件，不安装/更新插件或打开 Obsidian。
-- AI 看原图判定 OCR 疑字（用户要求时）：读取 [references/ai-judging.md](references/ai-judging.md)，含截图、判定、执行规则与异体字选项（规范字 / 保留原书字形）。
+- AI 看原图判定 OCR 疑字（用户要求时）：读取 [references/ai-judging.md](references/ai-judging.md)，整本六步流程（截图 → 子代理并行判定 → 合并过目 → 执行 → 把握低的交站长判 → 整批放行）、执行规则、异体字选项（规范字 / 保留原书字形）、花费参考与各书实例。
 
 ### PDF 本地预检
 
