@@ -21,14 +21,17 @@ MinerU 会输出一份 `full.md`，但它把页眉、页码、**脚注**标记�
 
 ```bash
 python scripts/mineru_api.py configure                    # 首次安全保存 API Token
-python scripts/mineru_api.py submit a.pdf -o MinerU       # 上传、轮询、下载并解压
+python scripts/mineru_api.py submit a.pdf -o <书>/_数据/MinerU原始   # 上传、轮询、下载并解压
 python scripts/mineru_api.py usage                        # 本机估算的当日额度
 python scripts/probe.py <mineru输出目录>              # 探查 + 六项自动检查
-python scripts/build.py <目录> -o _skeleton.md        # 重建骨架
+python scripts/build.py <目录> -o <书>/_数据/过程报告/_skeleton.md   # 重建骨架
+python scripts/split_book.py <骨架.md> -o <书> --meta book=书名      # 正文合成一份，卷首书末另存，出索引
 python scripts/verify.py <成品.md>                    # 结构自检
 python scripts/diff_report.py <目录> <成品.md>        # 交付前逐字符改动比对
 python scripts/crop_pdf.py <origin.pdf> --page 2 --rect 65,545,300,559 -o crop.png
 ```
+
+一本书的所有生成文件都放在它自己的文件夹里（正文、索引、校注、图片在顶层，`_数据/` 放 MinerU 原始产物、过程报告与逐字映射，`校勘/` 放校勘报告），打包文件夹即可交给别人。
 
 脚本把报告写成 UTF-8 文件、stdout 只打印 ASCII 状态行——Windows 控制台是 GBK，中文直接 print 会乱码。
 

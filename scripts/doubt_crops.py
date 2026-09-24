@@ -1,5 +1,8 @@
-# 从某书的 OCR 疑字清单取前 N 个「两家读法不一致」的字，按新映射截原图（整行附近 + 单字放大），
+# 从某书的 OCR 疑字清单取前 N 个疑字，按逐字映射截原图（整行附近 + 单字放大），
 # 每 5 个拼一张图，写 manifest.json。只读笔记库，输出到 out_dir。
+# 用法：python -X utf8 doubt_crops.py <书文件夹> <个数> <输出目录>
+#   书文件夹里要有 _数据/book.json（笔记1012 插件的书目）与 校勘/<书名> OCR疑字.md（插件生成的清单）。
+#   manifest 里的 file 是库内路径（库根按上溯找 .obsidian 定），给 apply_judgement.js 在 Obsidian 里用。
 import gzip
 import json
 import re
@@ -10,10 +13,14 @@ from urllib.parse import parse_qs, urlparse
 import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
-vault = Path(r"D:\projects\313考研")
-title, count, out_dir = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
+book_dir, count, out_dir = Path(sys.argv[1]).resolve(), int(sys.argv[2]), Path(sys.argv[3])
+book = json.loads((book_dir / "_数据" / "book.json").read_text("utf-8"))
+vault = next((parent for parent in book_dir.parents if (parent / ".obsidian").is_dir()), None)
+if vault is None:
+    raise SystemExit("书文件夹不在 Obsidian 库里（上溯找不到 .obsidian）")
+root = book_dir.relative_to(vault).as_posix()
 out_dir.mkdir(parents=True, exist_ok=True)
-note = (vault / "90-工作流/校勘记" / f"{title} OCR疑字.md").read_text("utf-8")
+note = (book_dir / "校勘" / f"{book['title']} OCR疑字.md").read_text("utf-8")
 rows = []
 for line in note.splitlines():
     # 两家读法不一致的行，与「两家一致但把握低」的行（两家读法都记成正文现在的字）
@@ -26,18 +33,19 @@ for line in note.splitlines():
         rows.append({**low.groupdict(), "m": value, "o": value, "kind": "low"})
     if len(rows) >= count:
         break
-catalog = json.loads((vault / "90-工作流/MinerU联动/catalog.json").read_text("utf-8"))
+# index.json 里的路径都相对书文件夹
+index = json.loads((book_dir / book["index"]).read_text("utf-8"))
 chapters: dict[str, dict] = {}
 docs: dict[str, pymupdf.Document] = {}
 items = []
 for number, row in enumerate(rows, start=1):
     query = parse_qs(urlparse(row["link"]).query)
-    file, start = query["path"][0], int(query["from"][0])
-    book = next(b for b in catalog["books"] if file.startswith(b["markdownRoot"] + "/"))
+    # 新链接写「书 id + 相对书文件夹的文件名」，旧链接写库内路径
+    relative = query["file"][0] if "file" in query else query["path"][0].removeprefix(root + "/")
+    file, start = f"{root}/{relative}", int(query["from"][0])
     if file not in chapters:
-        index = json.loads((vault / book["index"]).read_text("utf-8"))
-        chapters[file] = json.loads(gzip.decompress((vault / index["chapters"][file]["map"]).read_bytes()))
-        docs[file] = pymupdf.open(vault / book["pdf"])
+        chapters[file] = json.loads(gzip.decompress((book_dir / index["chapters"][relative]["map"]).read_bytes()))
+        docs[file] = pymupdf.open(book_dir / book["pdf"])
     hit = None
     for block in chapters[file]["blocks"]:
         for char in block.get("candidates", []) + block["chars"]:

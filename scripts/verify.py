@@ -11,7 +11,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import write_report
+from _common import process_report, write_report
 
 BUILTIN = ('tags', 'aliases', 'cssclasses')
 BUILTIN_CN = {'标签': 'tags', '别名': 'aliases', '样式': 'cssclasses'}
@@ -121,7 +121,7 @@ def main():
         R.append('## 全部通过\n')
     R.append('\n结构自检只管形式。内容有没有被改动，跑 diff_report.py。\n')
 
-    out = os.path.join(os.path.dirname(os.path.abspath(a.md)), '_verify.txt')
+    out = process_report(os.path.dirname(os.path.abspath(a.md)), '_verify.txt')
     write_report(out, ''.join(R))
     print('refs=%d defs=%d tags=%d anchors=%d problems=%d'
           % (len(refs), len(defs), len(tags), len(anchors), len(problems)))

@@ -8,7 +8,10 @@
   const options = window.__verifyRemaining || {};
   (async () => {
     const pdf = app.plugins.plugins.note1012.getModule("pdf");
-    const notePath = `90-工作流/校勘记/${options.title} OCR疑字.md`;
+    const target = (await pdf.store.loadCatalog()).books.find((book) => book.title === options.title);
+    if (!target) throw new Error(`书目里没有《${options.title}》`);
+    // 清单在书文件夹的「校勘」里
+    const notePath = `${target.markdownRoot}/校勘/${options.title} OCR疑字.md`;
     const note = await app.vault.read(app.vault.getAbstractFileByPath(notePath));
     const today = new Date().toISOString().slice(0, 10);
     const rows = [];
@@ -21,7 +24,9 @@
       const match = /^(.*)\*\*(.+?)\*\*(.*)$/.exec(context.trim());
       // 表格里的竖线写成了 \|，还原
       const unescape = (value) => value.replace(/\\\|/g, "|");
-      rows.push({ file: params.get("path"), before: unescape(match[1]), value: unescape(match[2]), after: unescape(match[3]) });
+      // 新链接写「书 id + 相对书文件夹的文件名」，旧链接写库内路径
+      const file = params.get("file") ? `${target.markdownRoot}/${params.get("file")}` : params.get("path");
+      rows.push({ file, before: unescape(match[1]), value: unescape(match[2]), after: unescape(match[3]) });
     }
     const books = new Map();
     for (const row of rows) {

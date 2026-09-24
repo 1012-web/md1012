@@ -153,7 +153,7 @@ def write_text(path: Path, text: str) -> None:
 
 
 def write_text_atomic(path: Path, text: str) -> None:
-    """Replace a shared file in one step so a crash mid-write cannot leave a truncated catalog."""
+    """Replace a shared file in one step so a crash mid-write cannot leave a truncated book entry."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
@@ -370,7 +370,7 @@ def heading_title(raw: str) -> str:
 
 def parse_markdown_file(
     path: Path,
-    vault_root: Path,
+    book_root: Path,
     printed_to_physical: Callable[[int], int],
 ) -> tuple[str, list[MarkdownBlock]]:
     text = read_text(path)
@@ -403,7 +403,7 @@ def parse_markdown_file(
         raw = text[absolute_start:absolute_end]
         mask = markdown_mask(raw)
         block = MarkdownBlock(
-            file=path.relative_to(vault_root).as_posix(),
+            file=path.relative_to(book_root).as_posix(),
             source_from=offsets[absolute_start],
             source_to=offsets[absolute_end],
             kind=block_kind(raw),
@@ -1929,13 +1929,15 @@ def block_ocr_text(block: MarkdownBlock) -> str:
     return "".join(char.candidate_value or char.value for char in block.chars)
 
 
+BOOK_FILE = "_数据/book.json"
+
+
 def write_outputs(
-    vault_root: Path,
+    book_root: Path,
     output_root: Path,
     book_id: str,
     title: str,
     pdf_path: str,
-    markdown_root: str,
     texts: dict[str, str],
     blocks: list[MarkdownBlock],
     page_count: int,
@@ -1944,6 +1946,11 @@ def write_outputs(
     writing_mode: str = "horizontal-tb",
     rebuild: dict[str, Any] | None = None,
 ) -> None:
+    """Write the mapping under output_root and the book entry to <book_root>/_数据/book.json.
+
+    Every path written (chapter keys, map files, PDF, index, rebuild config) is relative to the book
+    folder, so the folder can be renamed, moved or handed to someone else without touching a byte.
+    """
     output_root.mkdir(parents=True, exist_ok=True)
     by_file: dict[str, list[MarkdownBlock]] = defaultdict(list)
     pages: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -2086,7 +2093,7 @@ def write_outputs(
             json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
         chapters[file] = {
             "hash": digest,
-            "map": map_path.relative_to(vault_root).as_posix(),
+            "map": map_path.relative_to(book_root).as_posix(),
             "blocks": len(file_blocks),
             "mappedCharacters": mapped_characters,
             "candidateCharacters": candidate_characters,
@@ -2105,19 +2112,19 @@ def write_outputs(
         "pages": pages,
     }
     write_text(output_root / "index.json", json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-    catalog_path = output_root.parent / "catalog.json"
-    catalog = {"version": 1, "books": []}
-    if catalog_path.exists():
-        with catalog_path.open("r", encoding="utf-8", errors="strict") as handle:
-            current_catalog = json.load(handle)
-        if isinstance(current_catalog, dict) and isinstance(current_catalog.get("books"), list):
-            catalog = current_catalog
+    book_path = book_root / BOOK_FILE
+    previous: dict[str, Any] = {}
+    if book_path.exists():
+        with book_path.open("r", encoding="utf-8", errors="strict") as handle:
+            current = json.load(handle)
+        if isinstance(current, dict) and current.get("id") == book_id:
+            previous = current
     entry = {
+        "version": 1,
         "id": book_id,
         "title": title,
-        "markdownRoot": markdown_root,
         "pdf": pdf_path,
-        "index": (output_root / "index.json").relative_to(vault_root).as_posix(),
+        "index": (output_root / "index.json").relative_to(book_root).as_posix(),
         "printedPageOffset": printed_page_offset,
         "ocrBackend": ocr_backend,
         "writingMode": writing_mode,
@@ -2125,10 +2132,8 @@ def write_outputs(
     }
     # A run started without --rebuild-config must not silently drop the rebuild record an earlier run
     # wrote: keep every old field this run did not supply, and let the supplied ones win.
-    previous = next((book for book in catalog["books"] if book.get("id") == book_id), {})
     entry = {**previous, **entry}
-    catalog["books"] = [book for book in catalog["books"] if book.get("id") != book_id] + [entry]
-    write_text_atomic(catalog_path, json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
+    write_text_atomic(book_path, json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
 
     total = sum(entry["totalCharacters"] for entry in chapters.values())
     mapped = sum(entry["mappedCharacters"] for entry in chapters.values())
@@ -2171,11 +2176,12 @@ def write_outputs(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vault", type=Path, required=True)
+    parser.add_argument("--vault", type=Path, required=True, help="Directory the input paths below are relative to")
     parser.add_argument("--book-id", required=True)
     parser.add_argument("--title", required=True)
-    parser.add_argument("--pdf", required=True, help="Vault-relative PDF path")
-    parser.add_argument("--markdown-root", required=True)
+    parser.add_argument("--pdf", required=True, help="PDF path relative to --vault; must lie inside the book folder")
+    parser.add_argument("--markdown-root", required=True,
+                        help="Book folder relative to --vault; everything written is relative to it")
     parser.add_argument("--markdown-file", action="append", help="Explicit file relative to Markdown root; repeat for custom filenames")
     parser.add_argument("--layout-part", action="append", required=True, help="layout.json|physical-page-start")
     parser.add_argument("--model-part", action="append", help="*_model.json|physical-page-start")
@@ -2200,9 +2206,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--rebuild-config",
-        help="Vault-relative path of the sync configuration; recorded in catalog.json so the plugin can rerun pages",
+        help="Path of the sync configuration relative to the book folder; recorded in _数据/book.json so the plugin can rerun pages",
     )
-    parser.add_argument("--output", required=True, help="Vault-relative output directory")
+    parser.add_argument("--output", required=True, help="Output directory relative to --vault; must lie inside the book folder")
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--render-scale", type=float, default=2.0)
     parser.add_argument("--rec-model", default="PP-OCRv5_mobile_rec")
@@ -2253,6 +2259,9 @@ def main() -> None:
     output_dir = vault / Path(args.output)
     if not pdf_file.is_file() or not markdown_dir.is_dir():
         raise SystemExit("missing input")
+    for inside in (pdf_file, output_dir):
+        if not inside.resolve().is_relative_to(markdown_dir.resolve()):
+            raise SystemExit("the PDF and the output must lie inside the book folder (--markdown-root)")
 
     parts = []
     for value in args.layout_part:
@@ -2283,11 +2292,10 @@ def main() -> None:
         book_relative = path.relative_to(markdown_dir).as_posix()
         text, parsed = parse_markdown_file(
             path,
-            vault,
+            markdown_dir,
             page_mapper_for_file(book_relative, args.offset, file_offsets, page_overrides, range_offsets),
         )
-        relative = path.relative_to(vault).as_posix()
-        texts[relative] = text
+        texts[book_relative] = text
         blocks.extend(parsed)
 
     chars_by_page: dict[int, list[VisibleChar]] = defaultdict(list)
@@ -2388,19 +2396,18 @@ def main() -> None:
                         block.line_roles[(page, line)] = "interlinear"
 
     write_outputs(
-        vault,
-        output_dir,
+        markdown_dir.resolve(),
+        output_dir.resolve(),
         args.book_id,
         args.title,
-        Path(args.pdf).as_posix(),
-        Path(args.markdown_root).as_posix(),
+        pdf_file.resolve().relative_to(markdown_dir.resolve()).as_posix(),
         texts,
         blocks,
         document.page_count,
         args.offset,
         args.ocr_backend,
         args.writing_mode,
-        # Only a vault-relative configuration path is recorded; machine paths never enter the vault.
+        # Only a book-relative configuration path is recorded; machine paths never enter the vault.
         {"config": Path(args.rebuild_config).as_posix()} if args.rebuild_config else None,
     )
     detected = f" detectedLinePages={supplementer.pages} detectedLines={supplementer.lines}" if supplementer else ""

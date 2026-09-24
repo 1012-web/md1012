@@ -6,8 +6,8 @@
 
 ## 整本流程
 
-1. **截图**：`python -X utf8 scripts/doubt_crops.py "<书名>" 1000 <输出目录>`。读笔记库
-   `90-工作流/校勘记/<书名> OCR疑字.md`（先在插件里生成或更新），两档都收（manifest 的 `kind` 为 `disagree` / `low`），
+1. **截图**：`python -X utf8 scripts/doubt_crops.py <书文件夹> 1000 <输出目录>`。读书文件夹里的
+   `校勘/<书名> OCR疑字.md`（先在插件里生成或更新）与 `_数据/`，两档都收（manifest 的 `kind` 为 `disagree` / `low`），
    按逐字映射截原图（整行附近 + 单字放大），每 5 个拼一张 `sheet-N.png`，写 `manifest.json`。只读笔记库。
 2. **并行判定**：按约 50 个字（10 张拼图）一批，**每批一个全新子代理**，几批同时跑（一本约 300 字分 6 批，每批一两分钟）。
    子代理只把结果写成 `judgement-bK.json`，回报一行计数，不回贴表格，免得撑满主会话。提示词要点见下节。

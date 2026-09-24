@@ -1,9 +1,9 @@
 {
-  "version": "0.4.3-skill.1",
+  "version": "0.5.0-skill.1",
   "source": "scripts/sync_mapper.py (this skill is the sole maintainer since 2026-09-11; the vault-side generate_map.py is retired)",
   "sourceProject": "313 history vault",
-  "snapshotDate": "2026-09-24",
-  "sha256": "73de5f2e736abaa14a98a597db9cb21e33a379d90dbf21bd422713f9ebed72f0",
+  "snapshotDate": "2026-09-25",
+  "sha256": "12781fa80e64f8aaf9f72e6e2e2610fd05e2226b646757d69ddd1114c834e1b9",
   "changes": [
     "annotation and wikilink masking including multiline notes",
     "explicit Markdown input filenames",
@@ -33,7 +33,8 @@
     "line recovery now also runs for the ONNX backend: its detection model is PaddleOCR's either way, so a footnote or a table of contents keeps its recovered line boxes; Tesseract and Kraken still skip it to stay installable without PaddlePaddle",
     "dot leaders are collapsed before alignment: a run of two or more dot characters (. and the middle-dot family) becomes one unit on both sides, because Markdown writes two ellipses that NFKC expands into six periods while the page carries dozens of printed dots, and the surplus used to push the page number after them out of the alignment window; a single middle dot is left alone since it is a real separator in Chinese titles, and the collapsed unit carries every source character in the run so each one still receives the leader's bounding box",
     "the ONNX recognition backend defaults to PP-OCRv6_medium_rec and reads its character dictionary AND its input geometry from the model directory's inference.yml (PostProcess.character_dict plus PreProcess RecResizeImg.image_shape) instead of assuming PP-OCRv5's 3x48x320, with the yml checked against the static dimensions the ONNX graph declares so a mismatched pair of files fails loudly instead of silently rescaling every line; the Paddle backend still defaults to PP-OCRv5_mobile_rec because that is the only Paddle-format weight kept on disk for the fallback path. Measured on world-ancient-lower physical pages 41-60 (658 lines, batch 16, DirectML on an RX 9070 GRE, two runs, faster kept): character accuracy 99.64% -> 99.85% and 11.24s -> 13.83s for the 20 pages; DirectML and CPU agree line for line (658/658) on v6, and DirectML takes 186 of the graph's 188 nodes",
-    "per-character recognition confidence: the ONNX CTC decode also returns, for each character, the highest softmax value over the columns it occupies (PaddleX's line rec_score averages the same per-character maxima); scores ride in the OCR cache as an optional third item (old two-item entries still load, with no score), are attached to mapped characters on alignment, and are written to the chapter sidecar only below SCORE_CEILING (0.98) as chars[].score, plus candidates[].score for the OCR reading of a disagreeing character; a chapter carries scoreCeiling only when its run produced scores, and index chapters gain scoredCharacters. The plugin's backflow marker %%ha-bf:id%% is masked like annotation notes"
+    "per-character recognition confidence: the ONNX CTC decode also returns, for each character, the highest softmax value over the columns it occupies (PaddleX's line rec_score averages the same per-character maxima); scores ride in the OCR cache as an optional third item (old two-item entries still load, with no score), are attached to mapped characters on alignment, and are written to the chapter sidecar only below SCORE_CEILING (0.98) as chars[].score, plus candidates[].score for the OCR reading of a disagreeing character; a chapter carries scoreCeiling only when its run produced scores, and index chapters gain scoredCharacters. The plugin's backflow marker %%ha-bf:id%% is masked like annotation notes",
+    "book-folder layout: every path the mapper writes (index chapter keys, map files, page summaries, the PDF, the index location, the rebuild config) is relative to the book folder (--markdown-root), and the book entry is written to <book>/_数据/book.json instead of a shared catalog.json beside the output; the PDF and the output must lie inside the book folder, so the folder can be renamed, moved or handed to someone else as is"
   ],
   "compatibility": "MinerU PDF Sync sidecar schema version 1",
   "maintenance": "Bundled snapshot. Update deliberately with mapper tests and sidecar compatibility checks; never overwrite a local plugin automatically."

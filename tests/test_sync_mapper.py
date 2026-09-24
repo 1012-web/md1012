@@ -220,17 +220,25 @@ def test_vertical_interlinear_lines_are_marked_in_pairs() -> None:
     assert MODULE.interlinear_lines(lines, "horizontal-tb") == set()
 
 
-def test_write_outputs_merges_catalog_books(tmp_path: Path) -> None:
-    first = tmp_path / "sync" / "first"
-    second = tmp_path / "sync" / "second"
-    MODULE.write_outputs(tmp_path, first, "first", "甲", "a.pdf", "a", {}, [], 1, 0)
-    MODULE.write_outputs(tmp_path, second, "second", "乙", "b.pdf", "b", {}, [], 1, 0)
+def test_write_outputs_writes_a_book_relative_entry_into_the_book_folder(tmp_path: Path) -> None:
+    out = tmp_path / "_数据" / "映射"
+    MODULE.write_outputs(tmp_path, out, "book", "书", "书.pdf", {"03-正文.md": ""}, [], 1, 0)
 
-    with (tmp_path / "sync" / "catalog.json").open(
-        "r", encoding="utf-8", errors="strict"
-    ) as handle:
-        catalog = json.load(handle)
-    assert [book["id"] for book in catalog["books"]] == ["first", "second"]
+    with (tmp_path / "_数据" / "book.json").open("r", encoding="utf-8", errors="strict") as handle:
+        entry = json.load(handle)
+    assert entry == {"version": 1, "id": "book", "title": "书", "pdf": "书.pdf", "index": "_数据/映射/index.json",
+                     "printedPageOffset": 0, "ocrBackend": "paddle", "writingMode": "horizontal-tb"}
+    assert "markdownRoot" not in entry  # the book folder is wherever book.json sits
+
+
+def test_a_different_book_id_in_the_folder_is_replaced_not_merged(tmp_path: Path) -> None:
+    MODULE.write_outputs(tmp_path, tmp_path / "_数据" / "a", "first", "甲", "a.pdf", {}, [], 1, 0,
+                         rebuild={"config": "_数据/config.json"})
+    MODULE.write_outputs(tmp_path, tmp_path / "_数据" / "b", "second", "乙", "a.pdf", {}, [], 1, 0)
+
+    with (tmp_path / "_数据" / "book.json").open("r", encoding="utf-8", errors="strict") as handle:
+        entry = json.load(handle)
+    assert entry["id"] == "second" and "rebuild" not in entry
 
 
 def test_page_range_offsets_apply_before_default_offset() -> None:
@@ -260,14 +268,14 @@ def test_parse_page_range_offset_supports_negative_start() -> None:
         raise AssertionError("descending range must be rejected")
 
 
-def test_write_outputs_records_only_vault_relative_rebuild_config(tmp_path: Path) -> None:
-    out = tmp_path / "sync" / "book"
-    MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", "b", {}, [], 1, 0,
-                         rebuild={"config": "sync/_config/book.json"})
-    with (tmp_path / "sync" / "catalog.json").open("r", encoding="utf-8", errors="strict") as handle:
-        catalog = json.load(handle)
-    assert catalog["books"][0]["rebuild"] == {"config": "sync/_config/book.json"}
-    assert "python" not in catalog["books"][0]["rebuild"] and "cache" not in catalog["books"][0]["rebuild"]
+def test_write_outputs_records_only_book_relative_rebuild_config(tmp_path: Path) -> None:
+    out = tmp_path / "_数据" / "映射"
+    MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", {}, [], 1, 0,
+                         rebuild={"config": "_数据/config.json"})
+    with (tmp_path / "_数据" / "book.json").open("r", encoding="utf-8", errors="strict") as handle:
+        entry = json.load(handle)
+    assert entry["rebuild"] == {"config": "_数据/config.json"}
+    assert "python" not in entry["rebuild"] and "cache" not in entry["rebuild"]
 
 
 def test_merged_body_chapter_headings_reset_page_from_chapter_metadata(tmp_path: Path) -> None:
@@ -387,29 +395,28 @@ def test_parse_offset_config_is_shared_by_both_entry_points() -> None:
         raise AssertionError("incomplete page override must be rejected")
 
 
-def test_catalog_merge_keeps_fields_the_new_run_did_not_supply(tmp_path: Path) -> None:
-    first = tmp_path / "sync" / "v1"
-    second = tmp_path / "sync" / "v2"
-    MODULE.write_outputs(tmp_path, first, "book", "书", "b.pdf", "b", {}, [], 1, 0,
-                         ocr_backend="tesseract", rebuild={"config": "sync/_config/book.json"})
-    MODULE.write_outputs(tmp_path, second, "book", "书 第二版", "b.pdf", "b", {}, [], 1, 7)
+def test_book_entry_merge_keeps_fields_the_new_run_did_not_supply(tmp_path: Path) -> None:
+    first = tmp_path / "_数据" / "v1"
+    second = tmp_path / "_数据" / "v2"
+    MODULE.write_outputs(tmp_path, first, "book", "书", "b.pdf", {}, [], 1, 0,
+                         ocr_backend="tesseract", rebuild={"config": "_数据/config.json"})
+    MODULE.write_outputs(tmp_path, second, "book", "书 第二版", "b.pdf", {}, [], 1, 7)
 
-    with (tmp_path / "sync" / "catalog.json").open("r", encoding="utf-8", errors="strict") as handle:
-        catalog = json.load(handle)
-    entry = catalog["books"][0]
+    with (tmp_path / "_数据" / "book.json").open("r", encoding="utf-8", errors="strict") as handle:
+        entry = json.load(handle)
     assert entry["title"] == "书 第二版"
     assert entry["printedPageOffset"] == 7
-    assert entry["index"] == "sync/v2/index.json"
+    assert entry["index"] == "_数据/v2/index.json"
     # rebuild came from the earlier run only; dropping it would strand the plugin's rerun path.
-    assert entry["rebuild"] == {"config": "sync/_config/book.json"}
+    assert entry["rebuild"] == {"config": "_数据/config.json"}
     # ocrBackend is supplied by both runs, so the newer value wins rather than being preserved.
     assert entry["ocrBackend"] == "paddle"
 
 
-def test_catalog_is_replaced_atomically_without_leftovers(tmp_path: Path) -> None:
-    out = tmp_path / "sync" / "book"
-    MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", "b", {}, [], 1, 0)
-    catalog_path = tmp_path / "sync" / "catalog.json"
+def test_book_entry_is_replaced_atomically_without_leftovers(tmp_path: Path) -> None:
+    out = tmp_path / "_数据" / "映射"
+    MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", {}, [], 1, 0)
+    catalog_path = tmp_path / "_数据" / "book.json"
     original = catalog_path.read_bytes()
 
     def explode(*args, **kwargs):
@@ -419,7 +426,7 @@ def test_catalog_is_replaced_atomically_without_leftovers(tmp_path: Path) -> Non
     MODULE.os.replace = explode
     try:
         try:
-            MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", "b", {}, [], 1, 0)
+            MODULE.write_outputs(tmp_path, out, "book", "书", "b.pdf", {}, [], 1, 0)
         except OSError:
             pass
         else:
@@ -428,7 +435,7 @@ def test_catalog_is_replaced_atomically_without_leftovers(tmp_path: Path) -> Non
         MODULE.os.replace = real_replace
 
     assert catalog_path.read_bytes() == original
-    assert [p.name for p in (tmp_path / "sync").iterdir() if p.name.endswith(".tmp")] == []
+    assert [p.name for p in (tmp_path / "_数据").iterdir() if p.name.endswith(".tmp")] == []
 
 
 # --- 补行框：没有 ocr_text 行框的文本块（主要是页脚脚注）----------------------------
@@ -1155,7 +1162,7 @@ def test_write_outputs_keeps_only_low_scores_and_marks_the_ceiling(tmp_path: Pat
     block = MODULE.MarkdownBlock("a.md", 0, 3, "paragraph", [confident, doubtful, disputed], block_id="b1")
     output = tmp_path / "sync" / "out"
 
-    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", "", {"a.md": "甲乙丙"}, [block], 1, 0)
+    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", {"a.md": "甲乙丙"}, [block], 1, 0)
 
     index = json.loads((output / "index.json").read_text("utf-8"))
     entry = index["chapters"]["a.md"]
@@ -1176,7 +1183,7 @@ def test_write_outputs_without_any_scores_writes_no_ceiling(tmp_path: Path) -> N
     block = MODULE.MarkdownBlock("a.md", 0, 1, "paragraph", [plain], block_id="b1")
     output = tmp_path / "sync" / "out"
 
-    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", "", {"a.md": "甲"}, [block], 1, 0)
+    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", {"a.md": "甲"}, [block], 1, 0)
 
     index = json.loads((output / "index.json").read_text("utf-8"))
     with gzip.open(tmp_path / index["chapters"]["a.md"]["map"], "rt", encoding="utf-8") as handle:

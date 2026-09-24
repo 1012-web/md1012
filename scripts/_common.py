@@ -203,6 +203,14 @@ def significant(s):
     return ''.join(KEEP_RE.findall(s))
 
 
+def process_report(folder, name):
+    """交付物之外的过程报告（校验、比对、整理报告）一律放进 <书文件夹>/_数据/过程报告/，不跟正文混在一起。"""
+    target = os.path.join(folder, '_数据', '过程报告')
+    if not os.path.isdir(target):
+        os.makedirs(target)
+    return os.path.join(target, name)
+
+
 def write_report(path, text):
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(text)

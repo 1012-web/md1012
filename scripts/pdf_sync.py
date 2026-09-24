@@ -42,11 +42,17 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def within(root: Path, name: str) -> Path:
+def within(root: Path, name: str, allow_root: bool = False) -> Path:
     path = (root / name).resolve()
-    if not path.is_relative_to(root) or path == root:
+    if not path.is_relative_to(root) or (path == root and not allow_root):
         raise ValueError(f"Path must be below {root}: {name}")
     return path
+
+
+# Mapping data lives in the book folder itself: <book>/_数据/映射 (index + chapters), next to
+# <book>/_数据/book.json (the entry the Obsidian plugin discovers) and <book>/_数据/config.json.
+DATA_DIR = "_数据"
+DEFAULT_OUTPUT = f"{DATA_DIR}/映射"
 
 
 def default_cache_root() -> Path:
@@ -112,13 +118,19 @@ def load_config(path: Path) -> dict:
     if not vault.is_dir():
         raise ValueError("Vault directory is missing")
     raw["vault"] = vault
-    for key in ("pdf", "markdownRoot"):
-        raw[key] = within(vault, raw[key])
+    # markdownRoot is the book folder; "." when the config's vault already is the book folder
+    # (the portable layout: <book>/_数据/config.json with "vault": "..").
+    raw["markdownRoot"] = within(vault, raw["markdownRoot"], allow_root=True)
+    raw["pdf"] = within(vault, raw["pdf"])
     if not raw["pdf"].is_file() or not raw["markdownRoot"].is_dir():
         raise ValueError("PDF or Markdown directory is missing")
-    raw["output"] = within(vault, raw.get("output", f"90-工作流/MinerU联动/{raw['bookId']}"))
-    if raw["output"].is_relative_to(raw["markdownRoot"]) or raw["output"] == raw["pdf"]:
-        raise ValueError("Mapping output must be outside the Markdown input directory")
+    book = raw["markdownRoot"]
+    if not raw["pdf"].is_relative_to(book):
+        raise ValueError("The PDF must lie inside the book folder (markdownRoot)")
+    raw["output"] = (within(vault, raw["output"]) if raw.get("output")
+                     else (book / DEFAULT_OUTPUT).resolve())
+    if not raw["output"].is_relative_to(book / DATA_DIR) or raw["output"] == (book / DATA_DIR).resolve():
+        raise ValueError(f"Mapping output must be a directory under the book's {DATA_DIR}/ folder")
     raw["cache"] = (path.resolve().parent / raw["cache"]).resolve() if raw.get("cache") else default_cache_root()
     for key in ("layoutParts", "modelParts"):
         if not raw[key]:
@@ -199,7 +211,7 @@ def inspect_inputs(config: dict) -> dict:
     )
     pages = set()
     for source in config["files"]:
-        _, blocks = mapper.parse_markdown_file(source, config["vault"], mapper.page_mapper_for_file(
+        _, blocks = mapper.parse_markdown_file(source, config["markdownRoot"], mapper.page_mapper_for_file(
             source.relative_to(config["markdownRoot"]).as_posix(), config["printedPageOffset"], offsets, overrides, ranges))
         pages.update(c.physical_page for b in blocks for c in b.chars)
     if not pages or min(pages) < 1:
@@ -267,29 +279,31 @@ def command_args(config: dict, output: Path, cache: Path, rerun: str | None) -> 
         for value in config.get(key, []):
             args.extend([flag, value])
     config_path = config.get("configPath")
-    if config_path is not None and config_path.is_relative_to(vault):
-        # Recorded in catalog.json so the Obsidian plugin can rerun pages without machine paths.
-        args.extend(["--rebuild-config", config_path.relative_to(vault).as_posix()])
+    book = config["markdownRoot"]
+    if config_path is not None and config_path.is_relative_to(book):
+        # Recorded in _数据/book.json so the Obsidian plugin can rerun pages without machine paths.
+        args.extend(["--rebuild-config", config_path.relative_to(book).as_posix()])
     elif config_path is not None:
-        # Machine paths never enter the vault, so a config outside it simply cannot be recorded.
+        # Machine paths never enter the vault, so a config outside the book folder is not recorded.
         # Windows consoles are GBK: keep this ASCII, like every other line this entry point prints.
-        print("WARNING: the config file is outside the vault, so catalog.json records no "
-              "rebuild.config for this book and the plugin cannot rerun pages from the vault alone; "
-              "move the config into the vault (the _config directory next to the output) to record it.",
+        print("WARNING: the config file is outside the book folder, so _data/book.json records no "
+              "rebuild.config and the plugin cannot rerun pages; move the config to "
+              "<book>/_data/config.json (the folder is named with the Chinese word for data) to record it.",
               file=sys.stderr)
     if rerun:
         args.extend(["--rerun-pages", rerun])
     return args
 
 
-def audit_output(vault: Path, index_path: Path) -> dict:
+def audit_output(book: Path, index_path: Path) -> dict:
+    """Paths inside index.json are relative to the book folder."""
     index = read_json(index_path)
     gaps, block_gaps, mismatch = [], [], []
     mapped = total = blocks = 0
     for filename, entry in index["chapters"].items():
-        with gzip.open(within(vault, entry["map"]), "rt", encoding="utf-8", errors="strict") as handle:
+        with gzip.open(within(book, entry["map"]), "rt", encoding="utf-8", errors="strict") as handle:
             chapter = json.load(handle)
-        with within(vault, filename).open(encoding="utf-8", errors="strict") as handle:
+        with within(book, filename).open(encoding="utf-8", errors="strict") as handle:
             text = handle.read().replace("\r\n", "\n")
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if chapter["hash"] != digest or entry["hash"] != digest:
@@ -343,7 +357,7 @@ def generate(config: dict, rerun: str | None = None) -> dict:
         raise RuntimeError("Input changed during generation; do not accept this mapping")
     if result.returncode:
         raise RuntimeError(f"Mapper failed ({result.returncode}); earlier output directories are preserved")
-    report = audit_output(config["vault"], output / "index.json")
+    report = audit_output(config["markdownRoot"], output / "index.json")
     report.update({"elapsedSeconds": round(time.monotonic() - start, 2), "inputHashes": before,
                    "inputBytesUnchanged": True, "output": str(output), "cache": str(cache),
                    "rerunPhysicalPages": rerun, "apiRequests": 0, "obsidianActions": 0})

@@ -22,7 +22,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (CIRC, CIRC_RE, block_text, body_blocks, die, footnote_blocks,
-                     join_lines, line_texts, load_layout, significant, strip_tags, write_report)
+                     join_lines, line_texts, load_layout, process_report, significant, strip_tags,
+                     write_report)
 
 META_PREFIX = ('收稿日期', '作者简介', '基金项目', '通信作者', '引用格式', '作者单位', 'DOI')
 CIRC_SET = set(CIRC)
@@ -145,7 +146,7 @@ def main():
     R.append('  「删」类差异多半是第 5 类（搬进了 frontmatter），别误报成删除内容。\n')
     R.append('  凡是动了字的，都要进文末的 AI 校注 callout；需要用户拍板的加 ⚠️。\n')
 
-    write_report(os.path.join(os.path.dirname(os.path.abspath(a.md)), '_diff_report.txt'), ''.join(R))
+    write_report(process_report(os.path.dirname(os.path.abspath(a.md)), '_diff_report.txt'), ''.join(R))
     print('body_diffs=%d note_diffs=%d' % (n1, n2))
 
 

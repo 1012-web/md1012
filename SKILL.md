@@ -9,7 +9,7 @@ description: 通过 MinerU 精准解析 API 获取 PDF 解析产物，并把输�
 
 默认走下方普通转换流程。“转 Markdown”“整理 MinerU 输出”“转成 Obsidian 笔记”及“重新 OCR”均不启动逐字映射，不安装 PaddleOCR，不产生逐字 sidecar。只有用户明确要求“逐字对应 PDF”“选中文字精确定位原文”等能力，才追加逐字模式；“联动”等模糊表述先确认。之前某本书采用逐字模式，不改变新材料的默认值。
 
-- 普通转换：PDF 预检 → 确定 OCR 路线 → 获取或复用 MinerU 产物 → 审计与重建 → 核对标题、页码、脚注 → 按章/节拆分 → 校验与 diff → 文件交付。
+- 普通转换：PDF 预检 → 确定 OCR 路线 → 获取或复用 MinerU 产物 → 审计与重建 → 核对标题、页码、脚注 → 正文合并成一份、卷首书末另存 → 校验与 diff → 交付到书文件夹（布局见「交付物」）。
 - 逐字模式：普通转换完成并确定最终 Markdown（已有成品直接复用）→ 读取 [references/character-sync.md](references/character-sync.md) → 使用随 skill 提供的映射入口。默认只交付文件，不安装/更新插件或打开 Obsidian。
 - AI 看原图判定 OCR 疑字（用户要求时）：读取 [references/ai-judging.md](references/ai-judging.md)，整本六步流程（截图 → 子代理并行判定 → 合并过目 → 执行 → 把握低的交站长判 → 整批放行）、执行规则、异体字选项（规范字 / 保留原书字形）、花费参考与各书实例。
 
@@ -63,8 +63,10 @@ python <skill>/scripts/mineru_api.py configure
 ### 此后提交 PDF
 
 ```bash
-python <skill>/scripts/mineru_api.py submit a.pdf [b.pdf ...] -o <输出目录>
+python <skill>/scripts/mineru_api.py submit a.pdf [b.pdf ...] -o <书文件夹>/_数据/MinerU原始
 ```
+
+解析产物放进这本书自己的 `_数据/MinerU原始/`（一本书的所有东西都在它的文件夹里，见「交付物」）；一次提交多本时各书分开提交。
 
 客户端必须完成这些事：
 
@@ -94,7 +96,7 @@ python <skill>/scripts/probe.py <目录>
 
 「同页 mergeConnection」这条格外要看：合并关系本该跨页，同页出现几乎必是图注（被 MinerU 误判为正文）接进了正文段尾——正文凭空多一句图注，还多一个页码锚点。一本 693 页的书里可能只有 1 条，静默且致命。
 
-标题层级还有一种检查抓不到的形态：**不扁平但自相矛盾**（第一章 H2、第二章 H1）。那时 build.py 会照抄源层级，分章前务必自己 `grep "^#"` 扫一遍。
+标题层级还有一种检查抓不到的形态：**不扁平但自相矛盾**（第一章 H2、第二章 H1）。那时 build.py 会照抄源层级，整理成交付文件前务必自己 `grep "^#"` 扫一遍。
 
 **书有目录页的，拿它验层级。** `build.py` 只按编号形态分级，那是推断；而目录页的**缩进**是原书自己声明的层级，是另一路独立证据。做法：目录页的文字层多半是 OCR 的、`bbox.x0` 不可信（实测同一页里章、节、「一、」的 x0 会全挤在一档），所以**别读坐标，直接 `crop_pdf.py` 裁一页目录出来看**几级缩进。
 
@@ -103,7 +105,7 @@ python <skill>/scripts/probe.py <目录>
 ### 1. 重建骨架
 
 ```bash
-python <skill>/scripts/build.py <目录> -o _skeleton.md [--skip-marker 12,30]
+python <skill>/scripts/build.py <目录> -o <书文件夹>/_数据/过程报告/_skeleton.md [--skip-marker 12,30]
 ```
 
 `--skip-marker` 传上一步认定为非脚注的圈码全局序号。骨架已经处理好脚注编号、页码锚点、跨页合并、图表、标题层级（源里层级扁平时按编号形态重建）。
@@ -133,36 +135,40 @@ python <skill>/scripts/crop_pdf.py <origin.pdf> --page 0 --rect 85,220,509,270 -
 
 脚注按约定**只清标签、不补标点**（多为书目著录，补标点等于改引用格式）。
 
-### 2.5 论文与图书：按标题拆分
+### 2.5 论文与图书：正文合并成一份
 
-论文与图书都在骨架定稿后按标题拆分。长文不能保留为单个 Markdown：检索到一个段落时，相关脚注和页码必须在同一份文件里，才能让 AI 按需读取并回到原文核查。
-
-图书通常按一级标题拆分；论文通常保留一级标题作为全文题名，按二级标题拆分。`split_book.py` 的名称沿用，但同时服务于两种材料：
+骨架定稿后用 `split_book.py` 整理成交付文件（脚本名沿用，默认已不再拆章）：
 
 ```bash
-# 图书：按一级标题拆分
-python <skill>/scripts/split_book.py <整书.md> -o <输出目录> \
+# 图书：正文一份，卷首（书名页、目录、前言……）与书末（后记、附录……）各自一个文件
+python <skill>/scripts/split_book.py <整书.md> -o <书文件夹> \
     --meta book=书名 --meta editors=编者 --meta year=2009 --start-page 1
 
-# 论文：按二级标题拆分
-python <skill>/scripts/split_book.py <论文.md> -o <输出目录> \
-    --level 2 --meta work=论文题名 --meta year=2026
+# 论文：整篇一份，注释在文末
+python <skill>/scripts/split_book.py <论文.md> -o <书文件夹> \
+    --level 2 --meta book=论文题名 --meta year=2026
 ```
 
-按选定标题层级切分，**脚注按篇章重编号并放进各文件末尾**，frontmatter 继承来源字段再补 title/pages，另出一份索引。`--level 1`（默认）按一级标题切分，`--level 2` 按二级标题切分；二级标题之前的题名、摘要或导言自动归入第一节。`--start-page` 是第一篇章的起始印刷页（标题前的那个锚点通常留在了卷首）。
+- **哪些算正文**：默认从第一个到最后一个「第X章/编/篇/部分、绪论、导论、结束语……」标题。整理报告（`_数据/过程报告/_split_report.txt`）列出每个篇章的序号和去向，**必须读一遍**；认错了用 `--body 起-止`（报告里的序号）重跑。
+- **脚注**：正文全书连续编号，注释放在各章末尾（「---」+「## 注释」）；检索到某段时，注就在同一章里，不会隔几万字。卷首、书末文件各自从 1 编号。
+- **正文 frontmatter** 带 `chapter_metadata`（各章标题与印刷页）：拼接后章首页的页码锚点会落在上一章，逐字映射靠它给章标题定页，别删。
+- `--start-page` 是第一篇章的起始印刷页（标题前的那个锚点通常留在了卷首）。
+- 用户明确要求按章拆分时才加 `--split`（每章一个文件，脚注按章重编号）。
 
-书被分几次上传解析时，先把几份骨架接成一份整书再来分章——接缝处的段落是被 PDF 硬切断的，务必对着首尾文字接回去。
+书被分几次上传解析时，先把几份骨架接成一份整书再来整理——接缝处的段落是被 PDF 硬切断的，务必对着首尾文字接回去。
 
 ### 3. 校验与交付前 diff
 
 ```bash
 python <skill>/scripts/verify.py <成品.md>
 python <skill>/scripts/diff_report.py <目录> <成品.md>
-python <skill>/scripts/diff_report.py d1,d2,d3 "书/[01]*.md"   # 多段源 -> 多个分章
+python <skill>/scripts/diff_report.py d1,d2,d3 "书/[01]*.md"   # 多段源 -> 卷首、正文、书末几个文件
 python -X utf8 <skill>/scripts/copy_images.py <MinerU输出目录> <成品目录> --report <报告.json>
 ```
 
 图片不要整目录拷：`copy_images.py` 只复制成品 Markdown 真正引用到的图片，MinerU 多吐出来的页眉、装饰图、重复裁图留在原目录，报告里列为 orphans；已有同名不同内容的文件不覆盖（退出码 3；2 留给命令行用法错误）。引用的写法认全：`![alt](images/x.png "标题")`、`![](<images/含 空格.png>)`、`%20` 之类的 URL 转义、`![[x.png|300]]`、带引号或不带引号的 `<img src=...>`、以及 `[ref]: images/x.png` 这种引用式定义；扩展名覆盖 png/jpg/jpeg/gif/webp/bmp/jp2/svg/tif/tiff/avif。源目录下**所有** `images/` 目录会被一并收集合并（拆卷解析会有好几个），因此多段源只需对每个**成品目录**跑一次，不必按 part 跑；不同 part 出现同名但内容不同的图片时不猜，报告到 `sourceDuplicates` 并计入退出码 3。
+
+`verify.py`、`diff_report.py` 的报告写进成品所在书文件夹的 `_数据/过程报告/`。
 
 多目录/多文件时两侧按给定顺序拼接后比对，顺序必须与原书一致。卷首、版权页、目录、书末书签这些没进成品的部分会整块出现在「删」里，是预期的。
 
@@ -183,18 +189,26 @@ python -X utf8 <skill>/scripts/copy_images.py <MinerU输出目录> <成品目录
 
 ## 交付物
 
-**论文与图书**：索引 + 按标题拆分的文件（`split_book.py`），**不要再叠一份全文/全书**——同一段文字存两份会在检索时同时命中、挤占名额，两份还会漂移；需要整份材料时 `cat` 一下即可。
+**一本书的所有生成文件都在它自己的文件夹里**，打包这个文件夹就能交给别人；文件夹里的路径一律相对它自己写，改名、搬家都不失效。
 
 ```
-中国近现代史.md              索引：书目元数据 + 完整目录 + 各章链接与页码范围
-01-第一章 ….md               正文 + 本章脚注（按章重编号），frontmatter 标明书名/章名/页码范围
-02-…
-中国近现代史.AI校注.md        全书唯一一份校注，内部按章/页分节
+中国近现代史-章开沅/
+  中国近现代史.md              索引：书目元数据 + 完整目录 + 各章链接（指向「正文#章名」）与页码范围
+  01-前言.md                   卷首（每篇一个文件）
+  02-正文.md                   正文全部章节：脚注全书连续编号、注释在各章末尾；frontmatter 带 chapter_metadata
+  03-后记.md                   书末（每篇一个文件）
+  中国近现代史.AI校注.md        全书唯一一份校注，内部按章/页分节
+  中国近现代史.pdf、images/
+  校勘/                        笔记1012 插件生成：校勘记、OCR 疑字、校订版 PDF 说明、证据快照
+  _数据/
+    MinerU原始/                MinerU 解析产物（mineru_api.py -o 指到这里）
+    过程报告/                  _skeleton.md、_split_report.txt、_verify.txt、_diff_report.txt 等
+    book.json、config.json、映射/、校勘账本.json    逐字模式才有（见 references/character-sync.md）
 ```
 
-脚注按章重编号很关键：正文和它的注在同一个文件里，检索到某段时注能被一起召回；否则 `[^47]` 的定义在几万字之外，AI 看到的是空引用。
+**不要再叠一份按章拆开的副本**——同一段文字存两份会在检索时同时命中、挤占名额，两份还会漂移。
 
-每章 frontmatter 写清出处（书名、章名、对应印刷页码），让每个片段自描述。页码锚点 `<!--p.108-->` 保留，它让 AI 能给出可核对的引用。
+正文与卷首、书末各文件的 frontmatter 写清出处（书名、篇章、对应印刷页码），让每个文件自描述。页码锚点 `<!--p.108-->` 保留，它让 AI 能给出可核对的引用。
 
 **校注单独成文件**，不要放进正文——正文文件会被喂给 AI，校注混在里面会被当成内容检索到。
 

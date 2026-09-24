@@ -84,7 +84,8 @@ def book(tmp_path):
     with fitz.open() as doc:
         doc.new_page(width=100, height=100)
         doc.new_page(width=100, height=100)
-        doc.save(vault / "source.pdf")
+        (vault / "notes").mkdir()
+        doc.save(vault / "notes" / "source.pdf")
     write(vault / "notes" / "自定义章名.md", '<!--p.1-->\r\n\r\n<mark data-id="abc123">甲</mark>%%@abc123 备注%%[[乙]]<!--p.2-->丙丁\r\n')
     # The existing loader accepts model-style pages as layout fallback too.
     model = [[{"type": "text", "bbox": [0.1, 0.1, 0.9, 0.3], "content": text},
@@ -95,11 +96,11 @@ def book(tmp_path):
         {"type": "text", "bbox": [10, 10, 90, 30], "lines": [{"spans": [{"content": text}]}]}]}
         for i, text in enumerate(("甲乙", "丙丁"))]}
     write(vault / "layout.json", json.dumps(layout, ensure_ascii=False))
-    raw = {"mode": "character", "vault": str(vault), "bookId": "test-book", "title": "测试", "pdf": "source.pdf",
+    raw = {"mode": "character", "vault": str(vault), "bookId": "test-book", "title": "测试", "pdf": "notes/source.pdf",
            "markdownRoot": "notes", "markdownFiles": ["自定义章名.md"],
            "layoutParts": [{"path": str(vault / "layout.json"), "physicalStart": 1}],
            "modelParts": [{"path": str(vault / "model.json"), "physicalStart": 1}],
-           "printedPageOffset": 0, "output": "sync/test-book", "cache": str(tmp_path / "cache")}
+           "printedPageOffset": 0, "output": "notes/_数据/映射", "cache": str(tmp_path / "cache")}
     path = tmp_path / "config.json"
     write(path, json.dumps(raw, ensure_ascii=False))
     return path, raw
@@ -215,7 +216,7 @@ def test_cross_page_block_gap_fails_acceptance(tmp_path):
     block = mapper.MarkdownBlock("chapter.md", 0, 2, "paragraph", chars=chars,
                                  regions=[(1, (0.1, 0.1, 0.2, 0.2))], block_id="block")
     out = tmp_path / "sync" / "book"
-    mapper.write_outputs(tmp_path, out, "book", "书", "book.pdf", ".", {"chapter.md": "甲乙"}, [block], 2, 0)
+    mapper.write_outputs(tmp_path, out, "book", "书", "book.pdf", {"chapter.md": "甲乙"}, [block], 2, 0)
     report = sync.audit_output(tmp_path, out / "index.json")
     assert report["blockAcceptance"] == "failed"
     assert report["unmappedBlocks"][0]["physicalPages"] == [2]
@@ -361,7 +362,7 @@ def test_config_outside_the_vault_warns_that_rebuild_is_not_recorded(book, capsy
 
 def test_failed_acceptance_exits_3_so_usage_errors_keep_2(book, monkeypatch, capsys):
     path, _ = book
-    report = {"output": str(path.parent / "sync" / "test-book"), "blockAcceptance": "failed",
+    report = {"output": str(path.parent / "notes" / "_数据" / "映射"), "blockAcceptance": "failed",
               "hashMismatches": []}
     monkeypatch.setattr(sync, "generate", lambda config, pages=None: report)
     monkeypatch.setattr(sys, "argv", ["pdf_sync.py", "generate", "--config", str(path)])
@@ -391,17 +392,22 @@ def test_mapper_cli_offers_only_rerun_pages(book, monkeypatch):
     assert usage.value.code == 2
 
 
-def test_rebuild_config_is_recorded_vault_relative_when_config_inside_vault(book, monkeypatch):
+def test_portable_config_inside_the_book_folder_writes_only_book_relative_paths(book, monkeypatch):
+    """<book>/_数据/config.json with "vault": ".." and "markdownRoot": "." — the layout the plugin reads."""
     path, raw = book
     vault = Path(raw["vault"])
-    inside = vault / "sync" / "_config" / "test-book.json"
-    raw["vault"] = "../.."
+    book_root = vault / "notes"
+    inside = book_root / "_数据" / "config.json"
+    raw.update(vault="..", markdownRoot=".", pdf="source.pdf")
+    raw.pop("output")
     raw["layoutParts"] = [{"path": "../../layout.json", "physicalStart": 1}]
     raw["modelParts"] = [{"path": "../../model.json", "physicalStart": 1}]
     write(inside, json.dumps(raw, ensure_ascii=False))
     config = sync.load_config(inside)
+    assert config["output"] == (book_root / "_数据" / "映射").resolve()
     args = sync.command_args(config, config["output"], config["cache"], None)
-    assert args[args.index("--rebuild-config") + 1] == "sync/_config/test-book.json"
+    assert args[args.index("--rebuild-config") + 1] == "_数据/config.json"
+    assert args[args.index("--markdown-root") + 1] == "."
 
     def fake_load(engine, document, page, lines, cache, scale, writing_mode, force, base=None, loader=None):
         return [mapper.OCRChar(c, (0.1 + i * 0.4, 0.1, 0.5 + i * 0.4, 0.3))
@@ -422,10 +428,27 @@ def test_rebuild_config_is_recorded_vault_relative_when_config_inside_vault(book
     monkeypatch.setattr(sync.subprocess, "run", run)
     monkeypatch.setattr(sync, "dependency_report", lambda backend="paddle": {"python311": True, "packages": {"stub": {"available": True}}})
     report = sync.generate(config)
-    catalog = sync.read_json(vault / "sync" / "catalog.json")
-    entry = next(b for b in catalog["books"] if b["id"] == "test-book")
-    assert entry["rebuild"] == {"config": "sync/_config/test-book.json"}
+    entry = sync.read_json(book_root / "_数据" / "book.json")
+    assert entry["id"] == "test-book"
+    assert entry["rebuild"] == {"config": "_数据/config.json"}
+    assert entry["pdf"] == "source.pdf" and entry["index"] == "_数据/映射/index.json"
+    index = sync.read_json(book_root / "_数据" / "映射" / "index.json")
+    assert list(index["chapters"]) == ["自定义章名.md"]
+    assert index["chapters"]["自定义章名.md"]["map"].startswith("_数据/映射/chapters/")
+    assert {summary["file"] for summaries in index["pages"].values() for summary in summaries} == {"自定义章名.md"}
     assert report["blockAcceptance"] == "passed"
+
+
+def test_output_and_pdf_must_stay_inside_the_book_folder(book):
+    path, raw = book
+    raw["output"] = "sync/test-book"
+    write(path, json.dumps(raw, ensure_ascii=False))
+    with pytest.raises(ValueError, match="under the book's _数据/ folder"):
+        sync.load_config(path)
+    raw["output"] = "notes/_数据"
+    write(path, json.dumps(raw, ensure_ascii=False))
+    with pytest.raises(ValueError, match="under the book's _数据/ folder"):
+        sync.load_config(path)
 
 
 def test_footnote_block_without_line_boxes_is_detected_and_read_last(book, monkeypatch):

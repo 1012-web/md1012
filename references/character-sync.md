@@ -6,7 +6,7 @@
 
 默认只生成文件。不要安装/更新插件、启动 Obsidian、创建任务或发布代码。用户另行要求界面验收时才操作应用；文件检查通过不能写成已通过真实点击验收。
 
-先完成普通转换的标题层级、跨页拼接、分章、脚注重编号、页码和 diff；已有成品直接读取，不为创建坐标改写正文。原 PDF 不修改，已入库教材正文只读。Markdown 保留页码锚点和脚注；几何坐标、字符区间、哈希、重建参数外置。
+先完成普通转换的标题层级、跨页拼接、正文合并、脚注编号、页码和 diff；已有成品直接读取，不为创建坐标改写正文。原 PDF 不修改，已入库教材正文只读。Markdown 保留页码锚点和脚注；几何坐标、字符区间、哈希、重建参数外置。
 
 必须取得原 PDF、最终 Markdown、每个解析分卷的 layout/middle JSON 和受支持的 model JSON 视觉行框。分卷顺序以 API 报告里的原 PDF 物理起页为准，不能按 part 目录名称猜测。物理页为 1-based；印刷页用于引证，卷首可有独立偏移和逐页例外。没有可靠页序或视觉行框时，报告缺少什么并补齐后继续，不平均分配整段坐标。
 
@@ -26,24 +26,36 @@ check 只检查本地输入和依赖元数据，不导入 OCR 引擎、不下载
 
 推荐使用 uv 创建环境，然后安装该独立依赖清单；可复用经版本检查的现有 Python 3.11 OCR 环境。依赖检查只是可用性检查，真实模型运行仍需小样验证。正式处理前选正文、脚注、复杂排版的代表页核对原图，记录本地每页耗时；不要承诺固定 OCR 准确率。
 
-配置示例（路径可含中文，使用 UTF-8 JSON）：
+### 一本书的数据都在书文件夹里
+
+逐字模式的全部数据放在书文件夹的 `_数据/` 下，路径一律相对书文件夹，文件夹改名、搬到别的库、打包给别人都不用改一个字：
+
+```
+<书>/_数据/config.json     重建配置（本节下方的示例）
+<书>/_数据/book.json       书目条目：笔记1012 插件扫描库里所有 _数据/book.json 认书，由入口自动写
+<书>/_数据/映射/           index.json、chapters/*.json.gz、coverage-report.md、delivery-report.json
+<书>/_数据/MinerU原始/     MinerU 的 layout/model JSON（part-NN/），重建映射要用
+<书>/_数据/校勘账本.json   插件写的改字、认可、判定记录
+<书>/校勘/                 插件写的校勘记、OCR 疑字清单、校订版 PDF 说明、证据快照
+```
+
+配置示例（放在 `<书>/_数据/config.json`；路径可含中文，使用 UTF-8 JSON）：
 
 ```json
 {
   "mode": "character",
-  "vault": ".",
+  "vault": "..",
   "bookId": "example-book",
   "title": "示例书",
-  "pdf": "materials/book.pdf",
-  "markdownRoot": "materials/book",
-  "markdownFiles": ["01-正文.md", "02-附录.md"],
-  "layoutParts": [{"path": "raw/layout.json", "physicalStart": 1}],
-  "modelParts": [{"path": "raw/book_model.json", "physicalStart": 1}],
+  "pdf": "示例书.pdf",
+  "markdownRoot": ".",
+  "markdownFiles": ["01-前言.md", "02-正文.md", "03-附录.md"],
+  "layoutParts": [{"path": "MinerU原始/part-01/layout.json", "physicalStart": 1}],
+  "modelParts": [{"path": "MinerU原始/part-01/book_model.json", "physicalStart": 1}],
   "printedPageOffset": 40,
-  "fileOffsets": ["02-附录.md|42"],
-  "pageOverrides": ["01-正文.md|-36|4"],
-  "pageRangeOffsets": ["01-正文.md|423-893|26"],
-  "output": "90-工作流/MinerU联动/example-book",
+  "fileOffsets": ["03-附录.md|42"],
+  "pageOverrides": ["02-正文.md|-36|4"],
+  "pageRangeOffsets": ["02-正文.md|423-893|26"],
   "ocrBackend": "onnx",
   "onnxModel": "PP-OCRv6_medium_rec",
   "onnxDevice": "auto",
@@ -54,11 +66,11 @@ check 只检查本地输入和依赖元数据，不导入 OCR 引擎、不下载
 }
 ```
 
-`vault`、原始 JSON 路径相对于配置文件目录；pdf、markdownRoot、output 相对于 vault；markdownFiles 相对于 markdownRoot。示例页码只解释参数，不可用于其他书。页码偏移的优先级：`pageOverrides`（单页例外）> `pageRangeOffsets`（同一文件内某段印刷页用另一偏移，如上下册合订本）> `fileOffsets`（整个文件）> `printedPageOffset`（全书默认）。
+`vault`、原始 JSON 路径相对于配置文件目录；pdf、markdownRoot、output 相对于 vault；markdownFiles 相对于 markdownRoot。上面的写法让 vault 就是书文件夹（`"vault": ".."`、`"markdownRoot": "."`），这是插件认的布局。PDF 必须在书文件夹里；`output` 省略时为 `_数据/映射`，写了也必须在书的 `_数据/` 下。示例页码只解释参数，不可用于其他书。页码偏移的优先级：`pageOverrides`（单页例外）> `pageRangeOffsets`（同一文件内某段印刷页用另一偏移，如上下册合订本）> `fileOffsets`（整个文件）> `printedPageOffset`（全书默认）。
 
 三者的写法在 check 阶段就校验，不留到 OCR 跑完才发现：`pageRangeOffsets` 必须写全 `文件|起页-止页|偏移` 三段（单页也要写成 `61-61`，缺段或写成 `文件|61|3` 一律报 `page range offset must look like 'file|start-end|offset'`），区间必须升序；`fileOffsets` 是 `文件|偏移`，`pageOverrides` 是 `文件|印刷页|物理页`。三者引用的文件名都必须出现在 `markdownFiles`（未列时即 `[0-9][0-9]-*.md` 实际匹配到的文件），名字写错会直接报错——以前写错只是静默失配、整段按全书默认偏移跑偏。同一文件内的 `pageRangeOffsets` 区间不得互相重叠。
 
-`cache` 可省略：省略时 OCR 缓存写到本机用户目录 `~/.mineru-pdf-sync/cache`（环境变量 `MINERU_SYNC_HOME` 可改基目录；推荐虚拟环境也放 `~/.mineru-pdf-sync/venv`），不进入仓库。配置文件本身应放在仓库内（推荐 `90-工作流/MinerU联动/_config/<bookId>.json`），生成时 catalog.json 只记录该配置的仓库相对路径 `rebuild.config`，不写任何本机绝对路径；配置放在仓库外时会往 stderr 打一条 WARNING，说明这本书不会有 `rebuild.config`、插件无法只凭仓库重跑页面（这不是错误，生成照常完成）。catalog.json 里同一 `id` 的旧条目按字段合并：本次运行没提供的字段（如上一轮记下的 `rebuild`）保留，提供的覆盖；写入用临时文件加原子替换，中途失败不会留下半截 catalog。MinerU 的 layout/model JSON 也应复制进仓库（推荐 `90-工作流/MinerU联动/_source/<bookId>/part-NN/`），仓库搬家后仍能重建。当前考研仓库默认目录为 `90-工作流/MinerU联动/`，其他仓库可配置 output；消费插件必须使用相同目录。未列 markdownFiles 时只读取编号章节 `[0-9][0-9]-*.md`。
+`cache` 可省略：省略时 OCR 缓存写到本机用户目录 `~/.mineru-pdf-sync/cache`（环境变量 `MINERU_SYNC_HOME` 可改基目录；推荐虚拟环境也放 `~/.mineru-pdf-sync/venv`），不进入仓库。配置文件放在 `<书>/_数据/config.json`，生成时 `_数据/book.json` 只记录它相对书文件夹的路径 `rebuild.config`，不写任何本机绝对路径；配置放在书文件夹外时会往 stderr 打一条 WARNING，说明这本书不会有 `rebuild.config`、插件无法重跑页面（这不是错误，生成照常完成）。`book.json` 里同一 `id` 的旧条目按字段合并：本次运行没提供的字段（如上一轮记下的 `rebuild`）保留，提供的覆盖；写入用临时文件加原子替换，中途失败不会留下半截文件。MinerU 的 layout/model JSON 复制进 `<书>/_数据/MinerU原始/part-NN/`，书搬家后仍能重建。未列 markdownFiles 时只读取编号篇章 `[0-9][0-9]-*.md`。
 
 引用仓库内已有 PDF；外部 PDF 必要时原样复制到材料目录，用完整文件哈希检查一致性，并对副本添加精确 Git 忽略规则。已有同名不同内容文件不得覆盖。不要自动删除 PDF、缓存或旧输出。
 
@@ -156,9 +168,9 @@ ONNX 后端在 CTC 贪心解码时顺带取每个字的概率：这个字连续�
 
 ## 输出、验收与补修
 
-入口输出 schema v1 的 catalog、index、分章 gzip sidecar、coverage-report.md 和 delivery-report.json。兼容现有插件所需的正文匹配文本仍存在 sidecar 中；不在 Markdown 中添加坐标/定位 ID，不承诺所有书的 sidecar 固定仅几 MB。
+入口输出 schema v1 的 book.json、index、各 Markdown 文件的 gzip sidecar、coverage-report.md 和 delivery-report.json（index 里的章节键、映射文件、段落摘要的文件名都相对书文件夹）。兼容现有插件所需的正文匹配文本仍存在 sidecar 中；不在 Markdown 中添加坐标/定位 ID，不承诺所有书的 sidecar 固定仅几 MB。
 
-每次运行保留旧输出：目标已存在时生成带时间后缀的新目录，catalog 指向新版本。重跑只强制刷新所选物理页的缓存，但仍加载其余页并重建全书索引，不把页子集当成全书覆盖。缓存按 PDF 内容、视觉行源、识别模型/版本、渲染比例和排版方向隔离，避免不同书同页号串用字位。缓存文件名在页号之后还带该页**全部行框**的短哈希（`p0024-<hash8>.json`），行集一变就不会再命中旧结果——补出的脚注行框正因此不会被旧缓存挡住。补行框之前写下的旧缓存名为 `p0024.json`，只覆盖正文行；遇到这种文件时入口不整页重跑，而是只对补充行裁图识别，把新字符追加到旧缓存字符之后，写出带哈希的新文件，旧文件保留不删（脚注在页底，Markdown 里脚注文字也排在该页正文之后，追加顺序正确）。追加仅在补充行整体排在正文行之后时成立，否则退回整页识别。检测结果另有一层缓存 `lines/p0024-<blockhash>.json`，按待补块矩形、检测模型和**补行框算法版本**（`LINE_DETECTION_ALGORITHM`，现为 `det-v2`）命名，命中时连页面都不用渲染；算法一改版本号就要跟着改，旧版本留下的结果（尤其是短脚注那批空结果）才不会被重放。识别缓存 `pNNNN.json` 的追加路径不受影响，照旧复用。
+每次运行保留旧输出：目标已存在时在 `_数据/` 下生成带时间后缀的新目录（如 `映射-20260925T…Z`），book.json 指向新版本；确认新版可用后旧目录可以删。重跑只强制刷新所选物理页的缓存，但仍加载其余页并重建全书索引，不把页子集当成全书覆盖。缓存按 PDF 内容、视觉行源、识别模型/版本、渲染比例和排版方向隔离，避免不同书同页号串用字位。缓存文件名在页号之后还带该页**全部行框**的短哈希（`p0024-<hash8>.json`），行集一变就不会再命中旧结果——补出的脚注行框正因此不会被旧缓存挡住。补行框之前写下的旧缓存名为 `p0024.json`，只覆盖正文行；遇到这种文件时入口不整页重跑，而是只对补充行裁图识别，把新字符追加到旧缓存字符之后，写出带哈希的新文件，旧文件保留不删（脚注在页底，Markdown 里脚注文字也排在该页正文之后，追加顺序正确）。追加仅在补充行整体排在正文行之后时成立，否则退回整页识别。检测结果另有一层缓存 `lines/p0024-<blockhash>.json`，按待补块矩形、检测模型和**补行框算法版本**（`LINE_DETECTION_ALGORITHM`，现为 `det-v2`）命名，命中时连页面都不用渲染；算法一改版本号就要跟着改，旧版本留下的结果（尤其是短脚注那批空结果）才不会被重放。识别缓存 `pNNNN.json` 的追加路径不受影响，照旧复用。
 
 验收必须核查正文、标题、脚注的块级对应和跨页覆盖；正文/脚注块有缺失则标记未通过。机器检查有块不等于语义正确，需对照代表页原图核查。报告逐字覆盖率、候选坐标、缺失源码区间和相关物理页，保留可靠字位；没有字位的部分不能声称精确。图片/表格首版只作块级。
 
