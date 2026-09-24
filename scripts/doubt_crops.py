@@ -16,9 +16,14 @@ out_dir.mkdir(parents=True, exist_ok=True)
 note = (vault / "90-工作流/校勘记" / f"{title} OCR疑字.md").read_text("utf-8")
 rows = []
 for line in note.splitlines():
+    # 两家读法不一致的行，与「两家一致但把握低」的行（两家读法都记成正文现在的字）
     match = re.match(r"\| (?P<page>[^|]+) \| (?P<context>[^|]+) \| MinerU 「(?P<m>[^」]*)」 · OCR 「(?P<o>[^」]*)」[^|]* \| \[定位\]\((?P<link>[^)]+)\) \|", line)
+    low = re.match(r"\| (?P<page>[^|]+) \| (?P<context>[^|]+) \| 把握 (?P<score>\d+)% \| \[定位\]\((?P<link>[^)]+)\) \|", line)
     if match:
-        rows.append(match.groupdict())
+        rows.append({**match.groupdict(), "kind": "disagree"})
+    elif low:
+        value = re.search(r"\*\*(.+?)\*\*", low["context"]).group(1)
+        rows.append({**low.groupdict(), "m": value, "o": value, "kind": "low"})
     if len(rows) >= count:
         break
 catalog = json.loads((vault / "90-工作流/MinerU联动/catalog.json").read_text("utf-8"))
@@ -50,7 +55,7 @@ for number, row in enumerate(rows, start=1):
     zoom_path = out_dir / f"{number:02d}-zoom.png"
     line.save(line_path)
     zoom.save(zoom_path)
-    items.append({"n": number, "page": row["page"].strip(), "context": row["context"].strip(), "minerU": row["m"], "ocr": row["o"], "file": file, "from": start, "pdfPage": hit["page"], "line": line_path.name, "zoom": zoom_path.name})
+    items.append({"n": number, "kind": row["kind"], "page": row["page"].strip(), "context": row["context"].strip(), "minerU": row["m"], "ocr": row["o"], "file": file, "from": start, "pdfPage": hit["page"], "line": line_path.name, "zoom": zoom_path.name})
 
 # 每 5 个拼一张：左边编号，中间整行，右边放大
 font = ImageFont.load_default(size=28)

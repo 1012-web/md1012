@@ -55,9 +55,15 @@
       await app.vault.process(entry, (text) => {
         let out = text;
         for (const edit of [...list].sort((a, b) => b.item.from - a.item.from)) {
-          const from = edit.item.from;
+          let from = edit.item.from;
+          // 截图之后前面改过字（如换成扩展区的字占两个单位）位置会挪：按前后文在原位附近找回
+          if (out.slice(from, from + edit.item.minerU.length) !== edit.item.minerU) {
+            const needle = edit.before.slice(-4) + edit.item.minerU + edit.after.slice(0, 4);
+            const near = out.indexOf(needle, Math.max(0, from - 200));
+            from = near >= 0 && near - from < 400 ? near + edit.before.slice(-4).length : -1;
+          }
           const to = from + edit.item.minerU.length;
-          if (out.slice(from, to) !== edit.item.minerU) {
+          if (from < 0 || out.slice(from, to) !== edit.item.minerU) {
             mismatched.push(edit.item.n);
             continue;
           }
