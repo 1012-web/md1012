@@ -959,10 +959,11 @@ def test_ctc_decoding_reports_the_column_each_character_was_decoded_at() -> None
         [0.1, 0.1, 0.8],
     ])
 
-    values, columns = MODULE.onnx_ctc_decode(probabilities, charset)
+    values, columns, scores = MODULE.onnx_ctc_decode(probabilities, charset)
 
     assert values == ["甲", "乙"]
     assert columns == [1.0, 4.0]
+    assert scores == pytest.approx([0.8, 0.8])
 
 
 def test_device_choice_prefers_the_adapter_with_the_most_dedicated_memory(monkeypatch) -> None:
@@ -1080,3 +1081,109 @@ def test_onnx_cache_scope_separates_model_provider_and_batch() -> None:
     # 收尾行要能看出活派给了哪块卡
     assert engine.describe() == "dml:AMD Radeon RX 9070 GRE"
     assert MODULE.OnnxCharacterOCR.backend == "onnx"
+
+
+# ---------- 逐字识别置信度 ----------
+
+
+def test_ctc_score_takes_the_highest_column_a_character_spans() -> None:
+    numpy = pytest.importorskip("numpy")
+    charset = ["blank", "甲"]
+    probabilities = numpy.array([[0.3, 0.7], [0.1, 0.9], [0.9, 0.1]])
+
+    _, _, scores = MODULE.onnx_ctc_decode(probabilities, charset)
+
+    assert scores == pytest.approx([0.9])
+
+
+def test_chars_from_columns_carries_scores_and_drops_spaces_with_theirs() -> None:
+    chars = MODULE.chars_from_columns(
+        ["甲", " ", "乙"], [1.0, 3.0, 5.0], (0.0, 0.1, 1.0, 0.2), "horizontal-tb", [0.5, 0.1, 0.99]
+    )
+
+    assert [char.value for char in chars] == ["甲", "乙"]
+    assert [char.score for char in chars] == [0.5, 0.99]
+
+
+def test_chars_from_columns_without_scores_leaves_them_empty() -> None:
+    chars = MODULE.chars_from_columns(["甲", "乙"], [1.0, 5.0], (0.0, 0.1, 1.0, 0.2))
+
+    assert [char.score for char in chars] == [None, None]
+
+
+def test_align_page_hands_ocr_scores_to_mapped_and_candidate_characters() -> None:
+    markdown = [MODULE.VisibleChar("甲", 0, 1, 1, 41), MODULE.VisibleChar("乙", 1, 2, 1, 41)]
+    ocr = [
+        MODULE.OCRChar("甲", (0.1, 0.2, 0.3, 0.4), 0.62),
+        MODULE.OCRChar("丙", (0.3, 0.2, 0.5, 0.4), 0.97),
+    ]
+
+    MODULE.align_page(markdown, ocr)
+
+    assert markdown[0].score == 0.62
+    assert markdown[1].score is None
+    assert markdown[1].candidate_score == 0.97
+
+
+def test_ocr_cache_round_trips_scores_and_reads_old_two_item_entries(tmp_path: Path) -> None:
+    class Engine:
+        backend = "onnx"
+        cache_scope = "onnx-test"
+
+        def recognize(self, image, rects):
+            return [MODULE.OCRChar("甲", (0.1, 0.1, 0.2, 0.2), 0.73456), MODULE.OCRChar("乙", (0.2, 0.1, 0.3, 0.2))]
+
+    rects = [(0.1, 0.1, 0.9, 0.2)]
+    first = MODULE.load_or_run_ocr(Engine(), None, 1, rects, tmp_path, 2.0, image_loader=lambda: None)
+    again = MODULE.load_or_run_ocr(Engine(), None, 1, rects, tmp_path, 2.0, image_loader=lambda: None)
+
+    assert [char.score for char in first] == [0.73456, None]
+    assert [char.score for char in again] == [0.7346, None]
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text('[["甲", [0.1, 0.1, 0.2, 0.2]]]', "utf-8")
+    assert MODULE.read_ocr_cache(legacy)[0].score is None
+
+
+def test_write_outputs_keeps_only_low_scores_and_marks_the_ceiling(tmp_path: Path) -> None:
+    import gzip
+
+    confident = MODULE.VisibleChar("甲", 0, 1, 1, 1, rect=(0.1, 0.1, 0.2, 0.2), score=0.995)
+    doubtful = MODULE.VisibleChar("乙", 1, 2, 1, 1, rect=(0.2, 0.1, 0.3, 0.2), score=0.41)
+    disputed = MODULE.VisibleChar(
+        "丙", 2, 3, 1, 1, candidate_value="两", candidate_rect=(0.3, 0.1, 0.4, 0.2), candidate_score=0.93
+    )
+    block = MODULE.MarkdownBlock("a.md", 0, 3, "paragraph", [confident, doubtful, disputed], block_id="b1")
+    output = tmp_path / "sync" / "out"
+
+    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", "", {"a.md": "甲乙丙"}, [block], 1, 0)
+
+    index = json.loads((output / "index.json").read_text("utf-8"))
+    entry = index["chapters"]["a.md"]
+    assert entry["scoredCharacters"] == 2
+    with gzip.open(tmp_path / entry["map"], "rt", encoding="utf-8") as handle:
+        chapter = json.load(handle)
+    assert chapter["scoreCeiling"] == MODULE.SCORE_CEILING
+    chars = chapter["blocks"][0]["chars"]
+    assert "score" not in chars[0]
+    assert chars[1]["score"] == 0.41
+    assert chapter["blocks"][0]["candidates"][0]["score"] == 0.93
+
+
+def test_write_outputs_without_any_scores_writes_no_ceiling(tmp_path: Path) -> None:
+    import gzip
+
+    plain = MODULE.VisibleChar("甲", 0, 1, 1, 1, rect=(0.1, 0.1, 0.2, 0.2))
+    block = MODULE.MarkdownBlock("a.md", 0, 1, "paragraph", [plain], block_id="b1")
+    output = tmp_path / "sync" / "out"
+
+    MODULE.write_outputs(tmp_path, output, "book", "书", "a.pdf", "", {"a.md": "甲"}, [block], 1, 0)
+
+    index = json.loads((output / "index.json").read_text("utf-8"))
+    with gzip.open(tmp_path / index["chapters"]["a.md"]["map"], "rt", encoding="utf-8") as handle:
+        assert "scoreCeiling" not in json.load(handle)
+
+
+def test_backflow_markers_are_not_visible_text() -> None:
+    mask = MODULE.markdown_mask("甲%%ha-bf:abcdef12%%乙")
+
+    assert "".join(char for char, keep in zip("甲%%ha-bf:abcdef12%%乙", mask) if keep) == "甲乙"

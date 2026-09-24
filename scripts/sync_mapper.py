@@ -30,6 +30,8 @@ PAGES_RE = re.compile(r"^pages:\s*(-?\d+)", re.M)
 COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
 ANNOTATION_TAG_RE = re.compile(r"</?(?:mark|u|s)\b[^<>]*>")
 ANNOTATION_NOTE_RE = re.compile(r"%%@[0-9a-z]{6,12}[\s\S]*?%%")
+# 插件回流到词条页时在行尾写的标记，与备注一样不算可见正文
+BACKFLOW_MARKER_RE = re.compile(r"%%ha-bf:[0-9a-z]{6,12}%%")
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 FOOTNOTE_REF_RE = re.compile(r"\[\^\d+\](?::)?")
 MARKDOWN_LINK_RE = re.compile(r"\[([^]]+)\]\([^)]*\)")
@@ -50,6 +52,9 @@ LEADER_DOT_CHARS = frozenset(".·•‧・⋯")
 PAGE_RANGE_HINT = "page range offset must look like 'file|start-end|offset': "
 FILE_OFFSET_HINT = "file offset must look like 'file|offset': "
 PAGE_OVERRIDE_HINT = "page override must look like 'file|printed|physical': "
+# 章节映射里只给识别概率低于它的字写 score（高于它的占绝大多数，写了只增体积）。
+# 插件据此区分「把握足」与「没有概率数据」：章节带 scoreCeiling 才表示这次识别给出了逐字概率。
+SCORE_CEILING = 0.98
 DEFAULT_DETECTION_MODEL = "PP-OCRv5_mobile_det"
 # ONNX 后端的默认识别模型。Paddle 后端（--rec-model）仍默认 PP-OCRv5_mobile_rec：
 # 本机只留着那一份 Paddle 格式的权重，换默认值会让「装了 paddleocr 就能跑」的回退路径去联网下载。
@@ -88,6 +93,9 @@ class VisibleChar:
     rect: tuple[float, float, float, float] | None = None
     candidate_value: str | None = None
     candidate_rect: tuple[float, float, float, float] | None = None
+    # 识别置信度（0–1）：映射到的那个 OCR 字、以及读法不一致时 OCR 那一读的把握。只有能给出逐字概率的后端才有
+    score: float | None = None
+    candidate_score: float | None = None
 
 
 @dataclass
@@ -120,6 +128,7 @@ class LayoutBlock:
 class OCRChar:
     value: str
     rect: tuple[float, float, float, float]
+    score: float | None = None
 
 
 class CharacterOCR(Protocol):
@@ -221,7 +230,7 @@ def mask_range(mask: list[bool], start: int, end: int) -> None:
 def markdown_mask(block: str) -> list[bool]:
     mask = [True] * len(block)
     for pattern in (
-        COMMENT_RE, IMAGE_RE, FOOTNOTE_REF_RE, ANNOTATION_TAG_RE, ANNOTATION_NOTE_RE, BLOCK_ID_RE,
+        COMMENT_RE, IMAGE_RE, FOOTNOTE_REF_RE, ANNOTATION_TAG_RE, ANNOTATION_NOTE_RE, BACKFLOW_MARKER_RE, BLOCK_ID_RE,
     ):
         for match in pattern.finditer(block):
             mask_range(mask, match.start(), match.end())
@@ -270,6 +279,7 @@ def normalized_title(raw: str) -> str:
     text = COMMENT_RE.sub("", raw)
     text = BLOCK_ID_RE.sub("", text)
     text = ANNOTATION_NOTE_RE.sub("", text)
+    text = BACKFLOW_MARKER_RE.sub("", text)
     text = ANNOTATION_TAG_RE.sub("", text)
     text = WIKILINK_TARGET_RE.sub(r"\2", text)
     text = re.sub(r"\[\[([^\]|]+)\]\]", r"\1", text)
@@ -816,17 +826,24 @@ def chars_from_columns(
     columns: list[float],
     line_rect: tuple[float, float, float, float],
     writing_mode: str = "horizontal-tb",
+    scores: list[float] | None = None,
 ) -> list[OCRChar]:
     """把 CTC 输出里每个字所占的列号铺回行框，得到逐字坐标。
 
     两个识别后端都走这里：PaddleOCR 的列号来自 word_info，ONNX 的来自 argmax 序列的
     下标，语义相同（该字在 CTC 时间轴上被解码出来的位置），所以同一行给出同样的字框。
     """
-    pairs = [(value, column) for value, column in zip(values, columns) if not value.isspace()]
-    if not pairs:
+    score_list: list[float | None] = list(scores) if scores is not None else [None] * len(values)
+    triples = [
+        (value, column, score)
+        for value, column, score in zip(values, columns, score_list)
+        if not value.isspace()
+    ]
+    if not triples:
         return []
-    values = [value for value, _ in pairs]
-    columns = [column for _, column in pairs]
+    values = [value for value, _, _ in triples]
+    columns = [column for _, column, _ in triples]
+    score_list = [score for _, _, score in triples]
 
     axis_start, axis_end = (
         (line_rect[1], line_rect[3])
@@ -836,7 +853,10 @@ def chars_from_columns(
     positive_steps = [right - left for left, right in zip(columns, columns[1:]) if right > left]
     if not positive_steps or columns[-1] <= columns[0]:
         # 只认出一个字，或列号退化得没有方向：整行平分，好过按一个猜来的比例摆放。
-        return evenly_spaced_chars("".join(values), line_rect, writing_mode)
+        return [
+            OCRChar(char.value, char.rect, score)
+            for char, score in zip(evenly_spaced_chars("".join(values), line_rect, writing_mode), score_list)
+        ]
     # 不拿 word_info[0]（本行的有效列数）定标：PaddleX 先把这批行图按宽高比排序算出比例表，
     # 回填时却用原始次序去取，每行拿到的是别行的比例——长行被当成只剩开头几个字（其余字框
     # 宽度归零后被丢掉），短行则被整体压在行首。改用列号自身定标：把 [首列-半步, 末列+半步]
@@ -871,7 +891,7 @@ def chars_from_columns(
             )
         )
         if rect[2] > rect[0] and rect[3] > rect[1]:
-            out.append(OCRChar(value, rect))
+            out.append(OCRChar(value, rect, score_list[index]))
     return out
 
 
@@ -1070,15 +1090,19 @@ def onnx_resize_normalize(
     return out
 
 
-def onnx_ctc_decode(probabilities: Any, charset: list[str]) -> tuple[list[str], list[float]]:
-    """CTC 贪心解码，返回（字符列表，每个字在时间轴上的列号）。
+def onnx_ctc_decode(probabilities: Any, charset: list[str]) -> tuple[list[str], list[float], list[float]]:
+    """CTC 贪心解码，返回（字符列表，每个字在时间轴上的列号，每个字的识别概率）。
 
     列号与 PaddleX word_info 的第三项同义：都是该字被解码出来的那一列，
     所以两个后端可以共用 chars_from_columns。
+    概率取这个字连续占据的各列里最高的那个 softmax 值（模型输出已是 softmax），
+    与 PaddleX 行级 rec_score 取「各字最大概率的平均」同源，只是不再平均掉。
     """
     indices = probabilities.argmax(axis=1)
+    peaks = probabilities.max(axis=1)
     values: list[str] = []
     columns: list[float] = []
+    scores: list[float] = []
     previous = -1
     for column, index in enumerate(indices):
         index = int(index)
@@ -1086,8 +1110,11 @@ def onnx_ctc_decode(probabilities: Any, charset: list[str]) -> tuple[list[str], 
         if index != 0 and index != previous:
             values.append(charset[index])
             columns.append(float(column))
+            scores.append(float(peaks[column]))
+        elif index != 0 and scores:
+            scores[-1] = max(scores[-1], float(peaks[column]))
         previous = index
-    return values, columns
+    return values, columns, scores
 
 
 class OnnxCharacterOCR:
@@ -1152,7 +1179,7 @@ class OnnxCharacterOCR:
         detail = self.device_name if self.provider == "dml" else "cpu"
         return f"{self.provider}:{detail}"
 
-    def run_batch(self, crops: list[Any]) -> list[tuple[list[str], list[float]]]:
+    def run_batch(self, crops: list[Any]) -> list[tuple[list[str], list[float], list[float]]]:
         import numpy as np
 
         prepared = [onnx_resize_normalize(crop, self.shape) for crop in crops]
@@ -1176,7 +1203,7 @@ class OnnxCharacterOCR:
         crops = [cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops]
         # 宽高比相近的排在一批，组内补零的浪费最小；组内按各自宽度补到组内最大宽。
         order = sorted(range(len(crops)), key=lambda index: crops[index].shape[1] / crops[index].shape[0])
-        decoded: list[tuple[list[str], list[float]] | None] = [None] * len(crops)
+        decoded: list[tuple[list[str], list[float], list[float]] | None] = [None] * len(crops)
         for start in range(0, len(order), self.batch_size):
             chunk = order[start:start + self.batch_size]
             for index, result in zip(chunk, self.run_batch([crops[index] for index in chunk])):
@@ -1185,8 +1212,8 @@ class OnnxCharacterOCR:
         for result, line_rect in zip(decoded, recognition_rects):
             if not result:
                 continue
-            values, columns = result
-            chars.extend(chars_from_columns(values, columns, line_rect, self.writing_mode))
+            values, columns, scores = result
+            chars.extend(chars_from_columns(values, columns, line_rect, self.writing_mode, scores))
         return chars
 
 
@@ -1683,7 +1710,7 @@ class LineSupplementer:
 def read_ocr_cache(path: Path) -> list[OCRChar]:
     with path.open("r", encoding="utf-8", errors="strict") as handle:
         payload = json.load(handle)
-    return [OCRChar(item[0], tuple(item[1])) for item in payload]
+    return [OCRChar(item[0], tuple(item[1]), item[2] if len(item) > 2 else None) for item in payload]
 
 
 def load_or_run_ocr(
@@ -1722,7 +1749,13 @@ def load_or_run_ocr(
             chars = read_ocr_cache(legacy) + (engine.recognize(load_image(), extra) if extra else [])
     if chars is None:
         chars = engine.recognize(load_image(), ordered)
-    write_text_atomic(cache, json.dumps([[char.value, char.rect] for char in chars], ensure_ascii=False))
+    write_text_atomic(
+        cache,
+        json.dumps(
+            [[char.value, char.rect] + ([round(char.score, 4)] if char.score is not None else []) for char in chars],
+            ensure_ascii=False,
+        ),
+    )
     return chars
 
 
@@ -1824,10 +1857,13 @@ def align_page(
                 rect = ocr_group[0].rect if len(ocr_group) == 1 else union_rect(
                     [owner.rect for owner in ocr_group]
                 )
+                group_scores = [owner.score for owner in ocr_group if owner.score is not None]
+                score = min(group_scores) if len(group_scores) == len(ocr_group) else None
                 for owner in md_owners[md_index]:
                     key = id(owner)
                     if key not in seen:
                         owner.rect = rect
+                        owner.score = score
                         seen.add(key)
                         mapped += 1
             continue
@@ -1849,6 +1885,7 @@ def align_page(
             ):
                 owner.candidate_value = ocr_owner.value
                 owner.candidate_rect = ocr_owner.rect
+                owner.candidate_score = ocr_owner.score
                 candidate_seen.add(key)
     return mapped
 
@@ -1919,6 +1956,7 @@ def write_outputs(
         by_file[block.file].append(block)
     for file, file_blocks in by_file.items():
         mapped_characters = 0
+        scored_characters = 0
         candidate_characters = 0
         total_characters = 0
         page_map: dict[str, int] = {}
@@ -1939,7 +1977,9 @@ def write_outputs(
                     total_characters += 1
                 if character_supported and char.rect:
                     mapped_characters += 1
-                    chars.append([char.source_from, char.source_to, char.physical_page, list(char.rect)])
+                    if char.score is not None:
+                        scored_characters += 1
+                    chars.append([char.source_from, char.source_to, char.physical_page, list(char.rect), char.score])
                 elif character_supported and normalize_units(char.value):
                     if char.candidate_value and char.candidate_rect:
                         candidate_characters += 1
@@ -1950,6 +1990,7 @@ def write_outputs(
                             char.physical_page,
                             list(char.candidate_rect),
                             [char.value, char.candidate_value],
+                            char.candidate_score,
                         ])
                     missing.append([char.source_from, char.source_to])
             encoded_regions = [[page, list(rect)] for page, rect in block.regions]
@@ -1988,8 +2029,15 @@ def write_outputs(
                     for page, rect in encoded_lines
                 ],
                 "chars": [
-                    {"from": start, "to": end, "page": page, "rect": rect}
-                    for start, end, page, rect in chars
+                    {
+                        "from": start,
+                        "to": end,
+                        "page": page,
+                        "rect": rect,
+                        # 只记把握不足的字，省体积；没有 score 的字 = 不低于 SCORE_CEILING（或后端给不出概率）
+                        **({"score": round(score, 4)} if score is not None and score < SCORE_CEILING else {}),
+                    }
+                    for start, end, page, rect, score in chars
                 ],
                 "candidates": [
                     {
@@ -1999,8 +2047,9 @@ def write_outputs(
                         "page": page,
                         "rect": rect,
                         "alternatives": alternatives,
+                        **({"score": round(score, 4)} if score is not None else {}),
                     }
-                    for start, end, value, page, rect, alternatives in candidates
+                    for start, end, value, page, rect, alternatives, score in candidates
                 ],
                 "missing": missing,
                 **(
@@ -2031,6 +2080,7 @@ def write_outputs(
             "markdown": file,
             "hash": digest,
             "blocks": encoded_blocks,
+            **({"scoreCeiling": SCORE_CEILING} if scored_characters else {}),
         }
         with gzip.open(map_path, "wt", encoding="utf-8", errors="strict", newline="\n", compresslevel=9) as handle:
             json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
@@ -2040,6 +2090,7 @@ def write_outputs(
             "blocks": len(file_blocks),
             "mappedCharacters": mapped_characters,
             "candidateCharacters": candidate_characters,
+            "scoredCharacters": scored_characters,
             "totalCharacters": total_characters,
             "pageMap": page_map,
         }
