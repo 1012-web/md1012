@@ -1,4 +1,4 @@
-# mineru
+# md1012（原名 mineru）
 
 通过 [MinerU](https://github.com/opendatalab/MinerU) 精准解析 API 获取 PDF 解析产物，再整理成高质量 Markdown（Obsidian 格式，也适合喂给 AI）的 Claude Code skill。
 

@@ -1,9 +1,11 @@
 ---
-name: mineru1012
-description: 通过 MinerU 精准解析 API 获取 PDF 解析产物，并把输出目录整理成高质量 Markdown（Obsidian 格式，也适合喂给 AI）——自动处理 API 上传限制和结果下载，补回 full.md 丢失的脚注、页码与期刊元数据，还原被吞掉的标点，生成 frontmatter、[^n] 脚注和交付前改动报告。当用户要用 MinerU API 解析 PDF，或提到 MinerU 输出、full.md、block_list.json、layout.json、middle.json、content_list.json、PDF 转 Markdown/Obsidian、把 JSON 信息合并进 Markdown、整理论文/专著/古籍/期刊文献时使用。
+name: md1012
+description: 历史研究用的高质量 Markdown 工具链（原名 mineru）：用 MinerU 精准解析 API 取得 PDF 解析产物，整理成可信的 Obsidian Markdown（补回 full.md 丢失的脚注、页码与元数据，还原被吞的标点，正文合并成一份、卷首书末另存，一本书的全部文件放进它自己的文件夹，出改动报告）；按需给正文建逐字对应 PDF 的映射，配合笔记1012 插件做校勘记、OCR 疑字（含 AI 看原图判定、异体字规范化）与校订版 PDF 文字层。用户要解析或整理 PDF、处理 MinerU 输出（full.md、layout.json、middle.json、content_list.json）、把教材/论文/专著/古籍转成 Markdown、建或重建逐字映射、判定 OCR 疑字、生成校订版 PDF 时使用。
 ---
 
-# MinerU 输出整理
+# md1012：历史研究用的 Markdown 工具链
+
+（原名 mineru。脚本、参考文件里的「本 skill」即指它。）
 
 ## 模式选择（每份新材料重新判断）
 
