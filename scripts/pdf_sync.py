@@ -298,8 +298,8 @@ def command_args(config: dict, output: Path, cache: Path, rerun: str | None) -> 
 def audit_output(book: Path, index_path: Path) -> dict:
     """Paths inside index.json are relative to the book folder."""
     index = read_json(index_path)
-    gaps, block_gaps, mismatch = [], [], []
-    mapped = total = blocks = 0
+    gaps, unlocated_gaps, block_gaps, mismatch = [], [], [], []
+    mapped = total = blocks = unlocated = 0
     for filename, entry in index["chapters"].items():
         with gzip.open(within(book, entry["map"]), "rt", encoding="utf-8", errors="strict") as handle:
             chapter = json.load(handle)
@@ -319,13 +319,21 @@ def audit_output(book: Path, index_path: Path) -> dict:
                 block_gaps.append({"file": filename, "kind": block["kind"], "range": [block["from"], block["to"]], "physicalPages": missing_pages})
             if block["missing"]:
                 gaps.append({"file": filename, "physicalPages": expected, "ranges": block["missing"]})
+                # 有候选坐标的字位置已知，只是读法待定；重跑 OCR 帮不了它们，补修只看真正没有坐标的字。
+                placed = {candidate["from"] for candidate in block.get("candidates", [])}
+                bare = [span for span in block["missing"] if span[0] not in placed]
+                if bare:
+                    unlocated += len(bare)
+                    unlocated_gaps.append({"file": filename, "physicalPages": expected, "ranges": bare})
     return {"version": 1, "chapters": len(index["chapters"]), "blocks": blocks,
             "mappedCharacters": mapped, "totalCharacters": total,
             "characterCoveragePercent": round(100 * mapped / max(1, total), 2),
+            "unlocatedCharacters": unlocated,
             "blockAcceptance": "passed" if not block_gaps and blocks else "failed",
-            "unmappedBlocks": block_gaps, "missingCharacterRanges": gaps, "hashMismatches": mismatch,
-            "additionalRepair": {"requiresUserChoice": bool(gaps or block_gaps),
-                                 "physicalPages": sorted({p for gap in gaps + block_gaps for p in gap["physicalPages"]}),
+            "unmappedBlocks": block_gaps, "missingCharacterRanges": gaps,
+            "unlocatedCharacterRanges": unlocated_gaps, "hashMismatches": mismatch,
+            "additionalRepair": {"requiresUserChoice": bool(unlocated_gaps or block_gaps),
+                                 "physicalPages": sorted({p for gap in unlocated_gaps + block_gaps for p in gap["physicalPages"]}),
                                  "localOCRMinerUQuota": 0, "extraMinerUSubmission": "requires separate user choice and quota estimate",
                                  "timeEstimate": "Use measured seconds/page and affected pages; no fixed completion guarantee."}}
 

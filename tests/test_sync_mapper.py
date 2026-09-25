@@ -540,7 +540,8 @@ def test_line_supplementer_adds_footnote_lines_after_the_body_and_caches_them(tm
 
 
 def test_line_supplementer_skips_pages_whose_blocks_all_have_lines(tmp_path: Path) -> None:
-    body = MODULE.LayoutBlock(24, (0.1, 0.15, 0.9, 0.3), "正文", "text")
+    # MinerU 的块框贴着墨迹；块里没有行高那么大的空档，就不必渲染页面去找漏掉的行
+    body = MODULE.LayoutBlock(24, (0.1, 0.155, 0.9, 0.185), "正文", "text")
     supplementer = MODULE.LineSupplementer(tmp_path, factory=lambda: StubDetector([]))
 
     def explode():
@@ -1194,3 +1195,238 @@ def test_backflow_markers_are_not_visible_text() -> None:
     mask = MODULE.markdown_mask("甲%%ha-bf:abcdef12%%乙")
 
     assert "".join(char for char, keep in zip("甲%%ha-bf:abcdef12%%乙", mask) if keep) == "甲乙"
+
+
+# --- det-v3 与夹缝补位：章名装饰条、块内漏行、并成一框的两行、整行识别漏掉的窄字 ---------------
+
+
+def test_markup_tags_and_the_generated_notes_heading_are_not_print(tmp_path: Path) -> None:
+    source = tmp_path / "04-正文.md"
+    source.write_text(
+        "<!--p.1-->\n\n<small>资料来源：甲</small>\n\n---\n\n## 注释\n\n[^1]: <!--p.1--> 乙",
+        encoding="utf-8",
+    )
+
+    _, blocks = MODULE.parse_markdown_file(source, tmp_path, lambda page: page)
+
+    assert ["".join(char.value for char in block.chars) for block in blocks] == ["资料来源：甲", "乙"]
+
+
+def test_a_notes_heading_that_is_not_followed_by_footnotes_stays_text(tmp_path: Path) -> None:
+    source = tmp_path / "a.md"
+    source.write_text("<!--p.1-->\n\n## 注释\n\n正文里真有一节叫注释", encoding="utf-8")
+
+    _, blocks = MODULE.parse_markdown_file(source, tmp_path, lambda page: page)
+
+    assert "".join(char.value for char in blocks[0].chars) == "注释"
+
+
+def test_a_zero_read_as_the_letter_o_still_pins_its_position() -> None:
+    markdown = [MODULE.VisibleChar(value, index, index + 1, 1, 1) for index, value in enumerate("卷一〇")]
+    ocr = [MODULE.OCRChar(value, (0.1 * index, 0.1, 0.1 * index + 0.1, 0.2)) for index, value in enumerate("卷一O")]
+
+    assert MODULE.align_page(markdown, ocr) == 3
+    assert markdown[2].rect == (0.2, 0.1, 0.30000000000000004, 0.2)
+    assert markdown[2].value == "〇"
+
+
+def test_running_head_is_read_only_when_it_is_one_of_the_page_headings() -> None:
+    banner = MODULE.LayoutBlock(17, (0.55, 0.106, 0.899, 0.14), "第一章 溯源", "header")
+    running = MODULE.LayoutBlock(17, (0.17, 0.05, 0.35, 0.07), "儒学、数术与政治", "header")
+
+    assert MODULE.blocks_missing_lines([banner, running], [], "第一章溯源第一节感应与天谴") == [banner]
+    assert MODULE.blocks_missing_lines([banner, running], []) == []
+
+
+def test_uncovered_bands_find_a_forgotten_last_line_but_not_ordinary_leading() -> None:
+    # 脚注块：第一行有行框，第二行只剩「页上。」三个字，MinerU 没框
+    footnote = (0.1, 0.80, 0.9, 0.84)
+    assert MODULE.uncovered_bands(footnote, [(0.1, 0.80, 0.9, 0.815)]) == [(0.1, 0.815, 0.9, 0.84)]
+    # 正文段落：行距约等于一个行高，是正常排版，不算空档
+    body = (0.1, 0.30, 0.9, 0.378)
+    lines = [(0.1, 0.30, 0.9, 0.313), (0.1, 0.326, 0.9, 0.339), (0.1, 0.352, 0.9, 0.365), (0.1, 0.365, 0.9, 0.378)]
+    assert MODULE.uncovered_bands(body, lines) == []
+
+
+def test_line_supplementer_reads_the_forgotten_line_inside_a_block(tmp_path: Path) -> None:
+    image = ink_image([(482, 490), (500, 509)])
+    footnote = MODULE.LayoutBlock(44, (0.1, 0.8, 0.9, 0.85), "① 某书，第61页上。", "page_footnote")
+    first_line = (0.1, 0.8, 0.9, 0.817)
+    supplementer = MODULE.LineSupplementer(tmp_path, factory=lambda: StubDetector([]))
+
+    extra = supplementer.lines_for(44, [footnote], [first_line], lambda: image)
+
+    assert len(extra) == 1
+    assert extra[0][1] == pytest.approx(500 / 600)
+    assert supplementer.detector is None
+
+
+def test_tall_lines_spare_the_square_drop_cap_box() -> None:
+    lines = [
+        (0.111, 0.329, 0.18, 0.368),   # 放大首字，本来就高
+        (0.183, 0.328, 0.892, 0.368),  # 两行被框成一条
+        (0.112, 0.38, 0.891, 0.394),
+        (0.112, 0.406, 0.893, 0.42),
+        (0.113, 0.434, 0.892, 0.446),
+    ]
+    assert MODULE.tall_lines(lines) == [(0.183, 0.328, 0.892, 0.368)]
+
+
+def test_merge_similar_rows_keeps_a_drop_cap_apart_from_the_lines_beside_it() -> None:
+    cap = (0.103, 0.326, 0.17, 0.375)
+    first = (0.18, 0.328, 0.894, 0.345)
+    first_tail = (0.5, 0.329, 0.894, 0.344)
+    second = (0.18, 0.356, 0.894, 0.372)
+
+    assert MODULE.merge_similar_rows([second, cap, first_tail, first]) == [cap, (0.18, 0.328, 0.894, 0.345), second]
+
+
+def test_split_tall_replaces_a_two_line_box_and_caches_the_cut(tmp_path: Path) -> None:
+    image = ink_image([(197, 207), (213, 221)], columns=(80, 360))
+    lines = [(0.2, 0.33, 0.9, 0.37)] + [(0.1, 0.4 + index * 0.03, 0.9, 0.413 + index * 0.03) for index in range(4)]
+    supplementer = MODULE.LineSupplementer(tmp_path, factory=lambda: StubDetector([[]]))
+
+    split = supplementer.split_tall(47, lines, lambda: image)
+
+    assert len(split) == len(lines) + 1
+    assert split[2:] == lines[1:]
+    assert split[0][3] <= split[1][1]
+    assert supplementer.split == 1
+    cached = MODULE.LineSupplementer(tmp_path, factory=lambda: StubDetector([]))
+    assert cached.split_tall(47, lines, lambda: image) == split
+    assert cached.detector is None
+
+
+class ReplayEngine:
+    backend = "onnx"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.crops = []
+
+    def recognize(self, image, line_rects):
+        self.crops.append(line_rects)
+        rect = line_rects[0]
+        step = (rect[2] - rect[0]) / max(1, len(self.text))
+        return [
+            MODULE.OCRChar(value, (rect[0] + step * index, rect[1], rect[0] + step * (index + 1), rect[3]), 0.9)
+            for index, value in enumerate(self.text)
+        ]
+
+
+def gap_page(text: str, placed: str) -> list:
+    chars = []
+    for index, value in enumerate(text):
+        rect = (0.1 + index * 0.02, 0.5, 0.12 + index * 0.02, 0.52) if placed[index] == "x" else None
+        chars.append(MODULE.VisibleChar(value, index, index + 1, 1, 1, block_id="b1", rect=rect))
+    return chars
+
+
+def test_gap_repair_places_a_mark_the_whole_line_read_dropped() -> None:
+    chars = gap_page("曰：‘天子", "xx.xx")
+    engine = ReplayEngine("：‘天")
+
+    assert MODULE.repair_gaps(engine, lambda: None, chars) == 1
+    assert chars[2].rect is not None and chars[2].score == 0.9
+    assert engine.crops[0][0] == pytest.approx((0.12, 0.5, 0.18, 0.52))
+
+
+def test_gap_repair_keeps_the_gap_when_the_re_read_disagrees() -> None:
+    chars = gap_page("曰：‘天子", "xx.xx")
+
+    assert MODULE.repair_gaps(ReplayEngine("：“天"), lambda: None, chars) == 0
+    assert chars[2].rect is None
+
+
+def test_gap_repair_leaves_candidates_and_line_breaks_alone() -> None:
+    doubted = gap_page("甲乙丙", "x.x")
+    doubted[1].candidate_value, doubted[1].candidate_rect = "丁", (0.12, 0.5, 0.14, 0.52)
+    assert MODULE.gap_runs(doubted) == []
+
+    wrapped = gap_page("甲乙丙", "x.x")
+    wrapped[2].rect = (0.1, 0.55, 0.12, 0.57)
+    assert MODULE.gap_runs(wrapped) == []
+
+
+def test_ctc_force_align_finds_a_character_greedy_decoding_drops() -> None:
+    import numpy as np
+
+    # 三个字：甲(1)、‘(2)、乙(3)。第 3 列上「‘」只有 0.2，输给 blank，贪心解码会把它丢掉
+    probabilities = np.full((6, 4), 0.01)
+    rows = [(0, 0.9), (1, 0.9), (0, 0.9), (0, 0.78), (3, 0.9), (0, 0.9)]
+    for frame, (label, value) in enumerate(rows):
+        probabilities[frame, label] = value
+    probabilities[3, 2] = 0.2
+    values, _, _ = MODULE.onnx_ctc_decode(probabilities, ["", "甲", "‘", "乙"])
+    assert values == ["甲", "乙"]
+
+    spans = MODULE.ctc_force_align(probabilities, [1, 2, 3])
+
+    assert spans[0] == (1, 1) and spans[2] == (4, 4)
+    assert spans[1][0] >= 2 and spans[1][1] <= 3
+
+
+def test_ctc_force_align_cannot_fit_more_characters_than_columns() -> None:
+    import numpy as np
+
+    assert MODULE.ctc_force_align(np.full((2, 4), 0.25), [1, 2, 3]) is None
+
+
+class ForcingEngine(ReplayEngine):
+    def __init__(self, reread: str, scores: list[float], shift: float = 0.0) -> None:
+        super().__init__(reread)
+        self.scores = scores
+        self.shift = shift
+
+    def force_align(self, image, rect, text):
+        step = (rect[2] - rect[0]) / len(text)
+        return [
+            MODULE.OCRChar(value, (rect[0] + step * index + self.shift, rect[1],
+                                   rect[0] + step * (index + 1) + self.shift, rect[3]), score)
+            for index, (value, score) in enumerate(zip(text, self.scores))
+        ]
+
+
+def test_forced_alignment_places_a_weak_but_real_mark_and_records_its_score() -> None:
+    chars = gap_page("曰：‘天子", "xx.xx")
+    stats = {}
+
+    assert MODULE.repair_gaps(ForcingEngine("：天", [0.99, 0.06, 0.99]), lambda: None, chars, stats=stats) == 1
+    assert chars[2].rect is not None and chars[2].score == 0.06
+    assert stats == {"forced": 1}
+
+
+def test_forced_alignment_rejects_a_character_the_page_does_not_carry() -> None:
+    chars = gap_page("曰：‘天子", "xx.xx")
+
+    assert MODULE.repair_gaps(ForcingEngine("：天", [0.99, 3e-5, 0.99]), lambda: None, chars) == 0
+    assert chars[2].rect is None
+
+
+def test_forced_alignment_rejects_a_placement_that_moves_the_known_neighbours() -> None:
+    chars = gap_page("曰：‘天子", "xx.xx")
+
+    assert MODULE.repair_gaps(ForcingEngine("：天", [0.99, 0.5, 0.99], shift=0.03), lambda: None, chars) == 0
+
+
+def test_widen_to_ink_recovers_the_tail_the_detector_stopped_short_of() -> None:
+    image = ink_image([(300, 312)], columns=(50, 300))
+    detected = (50 / 400, 0.5, 200 / 400, 0.52)
+
+    assert MODULE.widen_to_ink(image, detected, (0.1, 0.49, 0.9, 0.53)) == (0.125, 0.5, 0.75, 0.52)
+    # 只放不收：检测框比墨迹宽时原样保留
+    assert MODULE.widen_to_ink(image, (0.1, 0.5, 0.8, 0.52), (0.1, 0.49, 0.9, 0.53)) == (0.1, 0.5, 0.8, 0.52)
+    # 隔着一大段空白的别处墨迹不算这一行的
+    far = ink_image([(300, 312)], columns=(50, 150))
+    far[300:312, 300:320] = 0
+    assert MODULE.widen_to_ink(far, (0.125, 0.5, 0.25, 0.52), (0.1, 0.49, 0.9, 0.53)) == (0.125, 0.5, 0.375, 0.52)
+
+
+def test_strip_rows_sees_a_three_character_last_line() -> None:
+    # 「页上。」只占块宽的一小截，按整块 2% 的门槛逐像素行都不够黑
+    image = ink_image([(505, 512)], columns=(48, 54))
+    band = (0.1, 0.83, 0.9, 0.86)
+
+    assert MODULE.project_block_rows(image, band, 0.012) == []
+    rows = MODULE.strip_rows(image, band, 0.012, [])
+    assert len(rows) == 1 and rows[0][0] == pytest.approx(0.12)

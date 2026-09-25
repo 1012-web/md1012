@@ -29,6 +29,10 @@ FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", re.S)
 PAGES_RE = re.compile(r"^pages:\s*(-?\d+)", re.M)
 COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
 ANNOTATION_TAG_RE = re.compile(r"</?(?:mark|u|s)\b[^<>]*>")
+# 排版用的 HTML 标签（表注的 <small>、上下标）：标签本身纸面上没有，里面的字照常对齐。
+MARKUP_TAG_RE = re.compile(r"</?(?:small|sup|sub|span|br|b|i|em|strong)\b[^<>]*>", re.I)
+# split_book.py 在每章末尾生成的「## 注释」小标题：原书没有这两个字，只是把脚注收拢在一起的记号。
+GENERATED_NOTES_HEADINGS = frozenset({"注释", "注"})
 ANNOTATION_NOTE_RE = re.compile(r"%%@[0-9a-z]{6,12}[\s\S]*?%%")
 # 插件回流到词条页时在行尾写的标记，与备注一样不算可见正文
 BACKFLOW_MARKER_RE = re.compile(r"%%ha-bf:[0-9a-z]{6,12}%%")
@@ -49,6 +53,9 @@ YAML_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(.*)$")
 # 把连续的点号整段折叠成一个记号，两边就都只剩一个点，点两侧的文字照常逐字对齐。
 # 单个「·」是正文里真正的间隔号（「工人运动的发展·宪章运动」），长度不足 2 的一律不碰。
 LEADER_DOT_CHARS = frozenset(".·•‧・⋯")
+# 「卷一〇」的〇，识别模型常读成字母 O 或数字 0。对齐时两侧都折成同一个单元：只影响「这是不是同一个
+# 位置」的判断，写出的字仍是 Markdown 原字；两侧同折，真正的 0 与 O 之间照样互相对得上。
+ZERO_LOOKALIKES = {"〇": "〇", "○": "〇", "O": "〇", "o": "〇", "0": "〇"}
 PAGE_RANGE_HINT = "page range offset must look like 'file|start-end|offset': "
 FILE_OFFSET_HINT = "file offset must look like 'file|offset': "
 PAGE_OVERRIDE_HINT = "page override must look like 'file|printed|physical': "
@@ -70,8 +77,21 @@ ONNX_MODEL_DIRECTORIES = {
 ONNX_RECOGNITION_SHAPE = (3, 48, 320)
 ONNX_MAX_IMAGE_WIDTH = 3200
 # Bump whenever the line-recovery recipe changes: it keys the detection cache, so old results stop being replayed.
-# det-v1 cropped tight and trusted the detector; det-v2 bleeds white space in and falls back when it reads nothing.
-LINE_DETECTION_ALGORITHM = "det-v2"
+# det-v1 cropped tight and trusted the detector; det-v2 bleeds white space in and falls back when it reads nothing;
+# det-v5 also reads chapter titles MinerU filed as running heads, fills line-sized holes inside blocks (a footnote's
+# short last line), grows detected lines along the ink the detector stopped short of (never shrinking them), and splits line boxes that
+# swallowed two lines (a drop cap beside them is the usual cause).
+LINE_DETECTION_ALGORITHM = "det-v5"
+# 章名印在页顶装饰条里时，MinerU 常把它归为页眉（header），块内不给行框。只有它的字确实出现在
+# 这一页 Markdown 的标题里才补读——真正的页眉（书名、章名缩写）不在正文里，读进来只会添乱。
+PROMOTABLE_BLOCK_KINDS = frozenset({"header", "doc_title"})
+# 一条行框的高度超过该页行高中位数这么多倍、又明显是横长条时，多半把两行（或放大首字旁的两行）框成了一条。
+TALL_LINE_RATIO = 1.8
+# 夹缝补位里强制对齐的下限：缺字在分给它的那几列上，模型给它的概率至少要到这么高才采用。
+# 实测（儒学、数术与政治 120 个缺口）：纸面上真有的字中位数 0.06、一成低于 0.001；把缺字换成纸面上
+# 没有的「甲」，最高只有 3e-5。0.001 与假字隔着 30 倍以上；低于它的真字多半是 Markdown 本身认错了字
+# （「数其厩福」原书作「祸」），留作缺字正好把它们暴露出来。
+FORCED_MIN_SCORE = 0.001
 # Blocks MinerU describes with one outer rectangle but no visual lines; the page footnote is the bulk of them.
 # Running heads, page numbers, footers and tables are deliberately absent: their text is not in the Markdown,
 # so supplementing them would only feed noise into the sequence alignment.
@@ -188,7 +208,7 @@ def normalized_chars(chars: Iterable[VisibleChar | OCRChar]) -> tuple[str, list[
     owners: list[tuple[Any, ...]] = []
     for char in chars:
         for unit in normalize_units(char.value):
-            units.append(unit)
+            units.append(ZERO_LOOKALIKES.get(unit, unit))
             owners.append((char,))
     return collapse_dot_leaders(units, owners)
 
@@ -230,7 +250,8 @@ def mask_range(mask: list[bool], start: int, end: int) -> None:
 def markdown_mask(block: str) -> list[bool]:
     mask = [True] * len(block)
     for pattern in (
-        COMMENT_RE, IMAGE_RE, FOOTNOTE_REF_RE, ANNOTATION_TAG_RE, ANNOTATION_NOTE_RE, BACKFLOW_MARKER_RE, BLOCK_ID_RE,
+        COMMENT_RE, IMAGE_RE, FOOTNOTE_REF_RE, ANNOTATION_TAG_RE, MARKUP_TAG_RE, ANNOTATION_NOTE_RE,
+        BACKFLOW_MARKER_RE, BLOCK_ID_RE,
     ):
         for match in pattern.finditer(block):
             mask_range(mask, match.start(), match.end())
@@ -397,11 +418,19 @@ def parse_markdown_file(
         cursor = separator.end()
     ranges.append((cursor, len(text)))
 
-    for absolute_start, absolute_end in ranges:
+    for position, (absolute_start, absolute_end) in enumerate(ranges):
         if absolute_end <= absolute_start:
             continue
         raw = text[absolute_start:absolute_end]
         mask = markdown_mask(raw)
+        following = text[ranges[position + 1][0]:ranges[position + 1][1]] if position + 1 < len(ranges) else ""
+        if (
+            block_kind(raw) == "heading"
+            and heading_title(raw) in GENERATED_NOTES_HEADINGS
+            and block_kind(following) == "footnote"
+        ):
+            # 紧跟着脚注定义的「## 注释」是整理时加的收拢标记，不是原书文字：整块不计入字位。
+            mask = [False] * len(raw)
         block = MarkdownBlock(
             file=path.relative_to(book_root).as_posix(),
             source_from=offsets[absolute_start],
@@ -629,19 +658,77 @@ def rects_overlap(
     return smallest > 0 and (width * height) / smallest > threshold
 
 
+def heading_block(block: LayoutBlock, heading_text: str) -> bool:
+    """A running-head block whose words are one of this page's Markdown headings, i.e. a chapter title in a banner."""
+    if block.kind not in PROMOTABLE_BLOCK_KINDS or not heading_text:
+        return False
+    text = normalize_units(block.text)
+    return len(text) >= 2 and text in heading_text
+
+
 def blocks_missing_lines(
     blocks: Iterable[LayoutBlock],
     lines: Iterable[tuple[float, float, float, float]],
+    heading_text: str = "",
 ) -> list[LayoutBlock]:
     """Text blocks that carry content but enclose no visual line box, so their characters would never be read."""
     known = list(lines)
     pending = [
         block for block in blocks
-        if block.kind in SUPPLEMENTABLE_BLOCK_KINDS
+        if (block.kind in SUPPLEMENTABLE_BLOCK_KINDS or heading_block(block, heading_text))
         and normalize_units(block.text).strip()
         and not lines_inside_region(block.rect, known)
     ]
     return sorted(pending, key=lambda block: (block.rect[1], block.rect[0]))
+
+
+def uncovered_bands(
+    rect: tuple[float, float, float, float],
+    lines: Iterable[tuple[float, float, float, float]],
+    edge_ratio: float = 0.8,
+    inner_ratio: float = 1.8,
+) -> list[tuple[float, float, float, float]]:
+    """Horizontal strips of a block that no line box covers and that are tall enough to hide a whole line.
+
+    MinerU's block rectangles hug the ink, so a line-high strip at the top or bottom edge is a line it forgot
+    (a footnote's last two or three characters wrapped onto a line of their own). Between two lines the normal
+    leading already accounts for about one line height here, so an inner strip must be nearly twice that.
+    The yardstick is the block's own lines: footnotes are set smaller than the body.
+    """
+    inside = lines_inside_region(rect, lines)
+    height = median_line_height(inside)
+    if not inside or height <= 0:
+        return []
+    bands = []
+    cursor = rect[1]
+    first = True
+    for line in inside:
+        limit = (edge_ratio if first else inner_ratio) * height
+        if line[1] - cursor >= limit:
+            bands.append((rect[0], round(cursor, 6), rect[2], round(line[1], 6)))
+        cursor = max(cursor, line[3])
+        first = False
+    if rect[3] - cursor >= edge_ratio * height:
+        bands.append((rect[0], round(cursor, 6), rect[2], rect[3]))
+    return bands
+
+
+def tall_lines(
+    lines: Iterable[tuple[float, float, float, float]],
+    ratio: float = TALL_LINE_RATIO,
+) -> list[tuple[float, float, float, float]]:
+    """Line boxes that are both far taller than the page's typical line and clearly a wide strip.
+
+    The width test spares the squarish box MinerU draws around a drop cap, which is tall on purpose.
+    """
+    known = list(lines)
+    height = median_line_height(known)
+    if height <= 0:
+        return []
+    return [
+        line for line in known
+        if line[3] - line[1] > ratio * height and line[2] - line[0] > 3 * (line[3] - line[1])
+    ]
 
 
 def block_media_candidates(candidates: Iterable[LayoutBlock]) -> list[LayoutBlock]:
@@ -1117,6 +1204,53 @@ def onnx_ctc_decode(probabilities: Any, charset: list[str]) -> tuple[list[str], 
     return values, columns, scores
 
 
+def ctc_force_align(probabilities: Any, labels: list[int]) -> list[tuple[int, int]] | None:
+    """CTC 强制对齐：已知这一段该读出哪几个字，求每个字最可能落在时间轴的哪几列。
+
+    标准做法——在「blank、字1、blank、字2、……、blank」这条扩展序列上做维特比（Viterbi，
+    求概率最大的一条路径），相邻相同的字之间必须隔一个 blank。返回每个字占据的列区间
+    （首列, 末列）；列数不够排下这些字时返回 None。
+    """
+    import numpy as np
+
+    frames = len(probabilities)
+    if not labels or frames < len(labels):
+        return None
+    log = np.log(np.clip(np.asarray(probabilities, dtype=np.float64), 1e-12, 1.0))
+    extended = [0]
+    for label in labels:
+        extended += [label, 0]
+    states = len(extended)
+    score = np.full((frames, states), -np.inf)
+    back = np.zeros((frames, states), dtype=np.int64)
+    score[0, 0] = log[0, extended[0]]
+    score[0, 1] = log[0, extended[1]]
+    for frame in range(1, frames):
+        for state in range(states):
+            options = [(score[frame - 1, state], state)]
+            if state >= 1:
+                options.append((score[frame - 1, state - 1], state - 1))
+            if state >= 2 and extended[state] != 0 and extended[state] != extended[state - 2]:
+                options.append((score[frame - 1, state - 2], state - 2))
+            best, source = max(options)
+            score[frame, state] = best + log[frame, extended[state]]
+            back[frame, state] = source
+    end = states - 1 if score[-1, states - 1] >= score[-1, states - 2] else states - 2
+    if not np.isfinite(score[-1, end]):
+        return None
+    path = [end]
+    for frame in range(frames - 1, 0, -1):
+        path.append(int(back[frame, path[-1]]))
+    path.reverse()
+    spans: list[list[int]] = [[] for _ in labels]
+    for frame, state in enumerate(path):
+        if state % 2 == 1:
+            spans[state // 2].append(frame)
+    if any(not span for span in spans):
+        return None
+    return [(span[0], span[-1]) for span in spans]
+
+
 class OnnxCharacterOCR:
     """ONNX Runtime 上的 PP-OCR 识别，预处理与 CTC 解码逐字对齐 PaddleX。
 
@@ -1215,6 +1349,43 @@ class OnnxCharacterOCR:
             values, columns, scores = result
             chars.extend(chars_from_columns(values, columns, line_rect, self.writing_mode, scores))
         return chars
+
+    def force_align(
+        self,
+        image: Any,
+        line_rect: tuple[float, float, float, float],
+        text: str,
+    ) -> list[OCRChar] | None:
+        """Place characters we already know are on this strip, using the model's own column probabilities.
+
+        Each character's score is the highest probability the model gave that character on the columns it was
+        assigned, so a weakly supported placement says so; the caller decides what is weak enough to reject.
+        """
+        import cv2
+
+        index = getattr(self, "_charset_index", None)
+        if index is None:
+            index = self._charset_index = {char: position for position, char in enumerate(self.charset) if position}
+        labels = [index.get(char, index.get(unicodedata.normalize("NFKC", char))) for char in text]
+        if not text or any(label is None for label in labels):
+            return None
+        crops, recognition_rects = line_crops(image, [line_rect], self.writing_mode)
+        if not crops:
+            return None
+        crop = cv2.cvtColor(crops[0], cv2.COLOR_BGR2RGB)
+        prepared = onnx_resize_normalize(crop, self.shape)
+        probabilities = self.session.run(None, {self.input_name: prepared[None]})[0][0]
+        # Short strips are padded to the model's base width; drop the columns that only saw padding.
+        height, width = crop.shape[:2]
+        real_width = min(prepared.shape[2], int(math.ceil(self.shape[1] * width / max(1, height))))
+        frames = max(1, min(len(probabilities), int(math.ceil(len(probabilities) * real_width / prepared.shape[2]))))
+        probabilities = probabilities[:frames]
+        spans = ctc_force_align(probabilities, labels)
+        if spans is None:
+            return None
+        columns = [(start + end) / 2 for start, end in spans]
+        scores = [float(probabilities[start:end + 1, label].max()) for (start, end), label in zip(spans, labels)]
+        return chars_from_columns(list(text), columns, recognition_rects[0], self.writing_mode, scores)
 
 
 def resolve_onnx_device(
@@ -1454,8 +1625,13 @@ def detect_block_lines(
     min_height: float = 0.004,
     margin: float = 0.5,
     max_bleed: int = 32,
+    merge: bool = True,
 ) -> list[tuple[float, float, float, float]]:
-    """Run detection on one block's crop and return its line boxes in page-normalized coordinates."""
+    """Run detection on one block's crop and return its line boxes in page-normalized coordinates.
+
+    With merge=False the raw boxes come back unjoined, for callers that must keep a drop cap apart from the
+    lines beside it (merge_row_boxes would fold both lines into the cap's height).
+    """
     height, width = image.shape[:2]
     # A one-line footnote cropped tight is a ~25px strip with no context, and the detector returns nothing at all.
     # Bleeding white space in on all four sides gives it a usable image; the centre test below drops whatever
@@ -1489,7 +1665,47 @@ def detect_block_lines(
         )
         if line[2] - line[0] > 0 and line[3] - line[1] >= min_height:
             out.append(line)
-    return merge_row_boxes(out)
+    return merge_row_boxes(out) if merge else sorted(out, key=lambda box: (box[1], box[0]))
+
+
+def merge_similar_rows(
+    boxes: Iterable[tuple[float, float, float, float]],
+    overlap: float = 0.6,
+    height_ratio: float = 1.5,
+) -> list[tuple[float, float, float, float]]:
+    """merge_row_boxes, but only for boxes of comparable height: a drop cap spanning two lines stays its own box."""
+    rows: list[list[float]] = []
+    for box in sorted(boxes, key=lambda value: (value[1], value[0])):
+        merged = False
+        for row in rows:
+            shared = min(row[3], box[3]) - max(row[1], box[1])
+            smallest = min(row[3] - row[1], box[3] - box[1])
+            largest = max(row[3] - row[1], box[3] - box[1])
+            if smallest > 0 and shared / smallest >= overlap and largest / smallest <= height_ratio:
+                row[0] = min(row[0], box[0])
+                row[1] = min(row[1], box[1])
+                row[2] = max(row[2], box[2])
+                row[3] = max(row[3], box[3])
+                merged = True
+                break
+        if not merged:
+            rows.append(list(box))
+    return sorted((tuple(round(value, 6) for value in row) for row in rows), key=lambda box: (box[1], box[0]))
+
+
+def split_tall_line(
+    detector: Any,
+    image: Any,
+    rect: tuple[float, float, float, float],
+    line_height: float,
+) -> list[tuple[float, float, float, float]]:
+    """Cut a line box that swallowed several lines back into single lines; keep it whole if no cut is trustworthy."""
+    rows = merge_similar_rows(detect_block_lines(detector, image, rect, merge=False))
+    text_rows = [row for row in rows if row[2] - row[0] > 2 * (row[3] - row[1])]
+    if len(text_rows) >= 2 and lines_cover_block(rows, rect):
+        return rows
+    projected = project_block_rows(image, rect, line_height)
+    return projected if len(projected) >= 2 else [rect]
 
 
 def merge_row_boxes(
@@ -1555,13 +1771,36 @@ def lines_cover_block(
     return covered / area >= ratio
 
 
+def ink_levels(gray: Any) -> tuple[float, float]:
+    """Paper and ink grey levels of a crop.
+
+    The 5th percentile stands for ink while ink covers a fair share of the crop. A strip holding only three
+    characters is almost all paper, so its 5th percentile is paper too; then the darkest pixel speaks for the
+    ink, but only if it is clearly dark (a speck of dust barely darkens the paper), otherwise the strip is blank.
+    """
+    import numpy as np
+
+    light = float(np.percentile(gray, 95))
+    dark = float(np.percentile(gray, 5))
+    if light - dark < 24:
+        darkest = float(gray.min())
+        if light - darkest >= 96:
+            dark = darkest
+    return light, dark
+
+
 def project_block_rows(
     image: Any,
     rect: tuple[float, float, float, float],
     line_height: float = 0.0,
     min_height: float = 0.004,
+    min_ink: int | None = None,
 ) -> list[tuple[float, float, float, float]]:
-    """Cut a block into lines by the blank rows between them, tightening each band to the ink it contains."""
+    """Cut a block into lines by the blank rows between them, tightening each band to the ink it contains.
+
+    A pixel row counts as ink when more than min_ink pixels are dark; the default (2% of the width) suits whole
+    blocks, but a footnote's last line of three characters falls below it, so strip searches pass a small count.
+    """
     import numpy as np
 
     height, width = image.shape[:2]
@@ -1573,13 +1812,12 @@ def project_block_rows(
         return []
     crop = image[y0:y1, x0:x1]
     gray = crop.mean(axis=2) if crop.ndim == 3 else crop.astype(float)
-    light = float(np.percentile(gray, 95))
-    dark = float(np.percentile(gray, 5))
+    light, dark = ink_levels(gray)
     if light - dark < 24:
         return []
     threshold = (light + dark) / 2
     ink = gray < threshold
-    rows = np.flatnonzero(ink.sum(axis=1) > max(1, int((x1 - x0) * 0.02)))
+    rows = np.flatnonzero(ink.sum(axis=1) > (min_ink if min_ink is not None else max(1, int((x1 - x0) * 0.02))))
     if rows.size == 0:
         return []
 
@@ -1617,6 +1855,80 @@ def project_block_rows(
     return sorted(out, key=lambda box: (box[1], box[0]))
 
 
+def widen_to_ink(
+    image: Any,
+    line: tuple[float, float, float, float],
+    block: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Grow a detected line outwards along its own ink until a real gap; never shrink it.
+
+    The detector sometimes stops short of a line's last few characters (「……载对策之一。」 came back without
+    「之一。」); recognition only reads what is inside the box, and chars_from_columns spreads what it read over
+    the whole box, so the box has to end where the ink ends. Growth follows connected ink only - a blank run
+    wider than one line height ends it - and ignores the top and bottom tenth of the line, where a neighbouring
+    line's strokes can reach in. Shrinking is never done: a full stop sits low in its cell and a measurement
+    that missed it once cut every footnote's closing 「。」 off.
+    """
+    import numpy as np
+
+    height, width = image.shape[:2]
+    x0 = max(0, int(block[0] * width))
+    x1 = min(width, int(block[2] * width) + 1)
+    inset = (line[3] - line[1]) * 0.1
+    y0 = max(0, int((line[1] + inset) * height))
+    y1 = min(height, int((line[3] - inset) * height) + 1)
+    if x1 - x0 < 4 or y1 - y0 < 2:
+        return line
+    crop = image[y0:y1, x0:x1]
+    gray = crop.mean(axis=2) if crop.ndim == 3 else crop.astype(float)
+    light, dark = ink_levels(gray)
+    if light - dark < 24:
+        return line
+    inked = (gray < (light + dark) / 2).sum(axis=0) > 0
+    gap = max(2, int(round((line[3] - line[1]) * height)))
+    left = max(0, min(len(inked) - 1, int(line[0] * width) - x0))
+    right = max(0, min(len(inked) - 1, int(math.ceil(line[2] * width)) - x0 - 1))
+    blank = 0
+    cursor = right
+    while cursor + 1 < len(inked) and blank <= gap:
+        cursor += 1
+        if inked[cursor]:
+            right = cursor
+            blank = 0
+        else:
+            blank += 1
+    blank = 0
+    cursor = left
+    while cursor - 1 >= 0 and blank <= gap:
+        cursor -= 1
+        if inked[cursor]:
+            left = cursor
+            blank = 0
+        else:
+            blank += 1
+    return (
+        round(min(line[0], (x0 + left) / width), 6),
+        line[1],
+        round(max(line[2], (x0 + right + 1) / width), 6),
+        line[3],
+    )
+
+
+def strip_rows(
+    image: Any,
+    band: tuple[float, float, float, float],
+    reference: float,
+    known: Iterable[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Lines hiding in a strip no line box covers: ink at least half a line high that overlaps no known line."""
+    others = list(known)
+    return [
+        row for row in project_block_rows(image, band, reference, min_ink=2)
+        if row[3] - row[1] >= 0.5 * reference
+        and not any(rects_overlap(row, other) for other in others)
+    ]
+
+
 def fallback_block_lines(
     image: Any,
     rect: tuple[float, float, float, float],
@@ -1649,25 +1961,63 @@ class LineSupplementer:
         self.detector: Any | None = None
         self.pages = 0
         self.lines = 0
+        self.split = 0
 
     def detector_instance(self) -> Any:
         if self.detector is None:
             self.detector = self.factory()
         return self.detector
 
-    def plan_digest(self, blocks: list[LayoutBlock]) -> str:
-        payload = json.dumps(
-            {
-                # The algorithm version is part of the key, so results from an earlier recipe (notably the empty
-                # ones a tight single-line crop used to produce) cannot be replayed after the recipe changes.
-                "algorithm": LINE_DETECTION_ALGORITHM,
-                "model": self.model_name,
-                "blocks": [[round(value, 6) for value in b.rect] for b in blocks],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+    def plan_digest(
+        self,
+        blocks: list[LayoutBlock],
+        bands: list[tuple[float, float, float, float]] | None = None,
+        kind: str = "",
+    ) -> str:
+        plan: dict[str, Any] = {
+            # The algorithm version is part of the key, so results from an earlier recipe (notably the empty
+            # ones a tight single-line crop used to produce) cannot be replayed after the recipe changes.
+            "algorithm": LINE_DETECTION_ALGORITHM,
+            "model": self.model_name,
+            "blocks": [[round(value, 6) for value in b.rect] for b in blocks],
+        }
+        if bands:
+            plan["bands"] = [[round(value, 6) for value in band] for band in bands]
+        if kind:
+            plan["kind"] = kind
+        payload = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+    def split_tall(
+        self,
+        page: int,
+        lines: Iterable[tuple[float, float, float, float]],
+        image_loader: Callable[[], Any],
+        force: bool = False,
+    ) -> list[tuple[float, float, float, float]]:
+        """Return the page's line set with every over-tall line box replaced by the single lines inside it."""
+        known = list(lines)
+        tall = tall_lines(known)
+        if not tall:
+            return known
+        cache = self.cache_dir / f"p{page:04d}-split-{self.plan_digest([], tall, 'split')}.json"
+        if cache.exists() and not force:
+            with cache.open("r", encoding="utf-8", errors="strict") as handle:
+                replacements = {tuple(key): [tuple(line) for line in value] for key, value in json.load(handle)}
+        else:
+            detector = self.detector_instance()
+            image = image_loader()
+            height = median_line_height(known)
+            replacements = {line: split_tall_line(detector, image, line, height) for line in tall}
+            write_text_atomic(cache, json.dumps(
+                [[list(key), [list(line) for line in value]] for key, value in replacements.items()],
+                ensure_ascii=False,
+            ))
+        out: list[tuple[float, float, float, float]] = []
+        for line in known:
+            out.extend(replacements.get(line, [line]))
+        self.split += sum(len(value) > 1 for value in replacements.values())
+        return out
 
     def lines_for(
         self,
@@ -1676,30 +2026,53 @@ class LineSupplementer:
         lines: Iterable[tuple[float, float, float, float]],
         image_loader: Callable[[], Any],
         force: bool = False,
+        heading_text: str = "",
     ) -> list[tuple[float, float, float, float]]:
         known = list(lines)
-        pending = blocks_missing_lines(blocks, known)
-        if not pending:
+        page_blocks = list(blocks)
+        pending = blocks_missing_lines(page_blocks, known, heading_text)
+        pending_ids = {id(block) for block in pending}
+        # Blocks that do have lines can still hide one: a line-high strip no line box covers.
+        holes = [
+            (band, median_line_height(lines_inside_region(block.rect, known)))
+            for block in sorted(page_blocks, key=lambda block: (block.rect[1], block.rect[0]))
+            if block.kind in SUPPLEMENTABLE_BLOCK_KINDS and id(block) not in pending_ids
+            and normalize_units(block.text).strip()
+            for band in uncovered_bands(block.rect, known)
+        ]
+        if not pending and not holes:
             return []
-        cache = self.cache_dir / f"p{page:04d}-{self.plan_digest(pending)}.json"
+        cache = self.cache_dir / f"p{page:04d}-{self.plan_digest(pending, [band for band, _ in holes])}.json"
         if cache.exists() and not force:
             with cache.open("r", encoding="utf-8", errors="strict") as handle:
                 extra = [tuple(item) for item in json.load(handle)]
         else:
-            detector = self.detector_instance()
             image = image_loader()
             body_height = median_line_height(known)
             found: list[tuple[float, float, float, float]] = []
             for block in pending:
-                boxes = detect_block_lines(detector, image, block.rect)
+                boxes = detect_block_lines(self.detector_instance(), image, block.rect)
                 if not lines_cover_block(boxes, block.rect):
                     boxes = fallback_block_lines(image, block.rect, body_height)
+                boxes = [box if box == block.rect else widen_to_ink(image, box, block.rect) for box in boxes]
                 kept = [line for line in boxes if not any(rects_overlap(line, other) for other in known)]
                 if not kept and not any(rects_overlap(block.rect, other) for other in known):
                     # A block with text must never end up with no line box: read it whole rather than not at all.
                     kept = [block.rect]
                 known.extend(kept)
                 found.extend(kept)
+                if kept != [block.rect]:
+                    # Detection can also skip a whole short line; look for it in the strips left uncovered.
+                    reference = median_line_height(lines_inside_region(block.rect, known)) or body_height
+                    for band in uncovered_bands(block.rect, known):
+                        rows = strip_rows(image, band, reference, known)
+                        known.extend(rows)
+                        found.extend(rows)
+            for band, reference in holes:
+                # Only ink that really forms a line counts; an empty strip is just generous block padding.
+                rows = strip_rows(image, band, reference, known)
+                known.extend(rows)
+                found.extend(rows)
             extra = ordered_lines(found, self.writing_mode)
             write_text_atomic(cache, json.dumps([list(line) for line in extra], ensure_ascii=False))
         self.pages += 1
@@ -1890,6 +2263,126 @@ def align_page(
     return mapped
 
 
+def alignment_unit(value: str) -> str:
+    """The form align_page compares a character in, so a re-read is judged by the same rule as the page."""
+    return "".join(ZERO_LOOKALIKES.get(unit, unit) for unit in normalize_units(value))
+
+
+def same_row(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    ratio: float = 0.5,
+) -> bool:
+    shared = min(first[3], second[3]) - max(first[1], second[1])
+    smallest = min(first[3] - first[1], second[3] - second[1])
+    return smallest > 0 and shared / smallest >= ratio
+
+
+def gap_runs(
+    chars: list[VisibleChar],
+    max_run: int = 4,
+) -> list[tuple[VisibleChar, list[VisibleChar], VisibleChar]]:
+    """Short runs of characters with no position at all, framed by two placed neighbours on one printed row.
+
+    A character that already has a candidate reading is not a gap: its position is known, only the reading
+    is in doubt, and the plugin settles that. Runs that cross a line or block boundary are left alone.
+    """
+    out = []
+    index = 0
+    while index < len(chars):
+        if chars[index].rect is not None or chars[index].candidate_rect is not None:
+            index += 1
+            continue
+        start = index
+        while index < len(chars) and chars[index].rect is None and chars[index].candidate_rect is None:
+            index += 1
+        run = chars[start:index]
+        if start == 0 or index >= len(chars) or len(run) > max_run:
+            continue
+        left, right = chars[start - 1], chars[index]
+        if (
+            left.rect and right.rect
+            and left.block_id == right.block_id == run[0].block_id
+            and all(len(alignment_unit(char.value)) == 1 for char in [left, *run, right])
+            and same_row(left.rect, right.rect)
+            and right.rect[0] > left.rect[0]
+        ):
+            out.append((left, run, right))
+    return out
+
+
+def repair_gaps(
+    engine: CharacterOCR,
+    load_image: Callable[[], Any],
+    page_chars: list[VisibleChar],
+    writing_mode: str = "horizontal-tb",
+    stats: dict[str, int] | None = None,
+) -> int:
+    """Re-read the strip between two placed neighbours and keep the result only if it spells exactly what we expect.
+
+    Whole-line recognition drops narrow marks (‘ 〈 —) or reads 〇 as nothing; on a crop three or four characters
+    wide the same model usually reads them. Nothing is inferred: if the re-read does not reproduce the neighbours
+    and the missing characters one for one, the gap stays a gap.
+    """
+    if writing_mode != "horizontal-tb":
+        return 0
+    runs = gap_runs(page_chars)
+    if not runs:
+        return 0
+    image = load_image()
+    repaired = 0
+    for left, run, right in runs:
+        crop = (
+            left.rect[0],
+            min(left.rect[1], right.rect[1]),
+            right.rect[2],
+            max(left.rect[3], right.rect[3]),
+        )
+        read = [char for char in engine.recognize(image, [crop]) if alignment_unit(char.value)]
+        expected = [left, *run, right]
+        how = "reread"
+        if [alignment_unit(char.value) for char in read] != [alignment_unit(char.value) for char in expected]:
+            read = forced_placement(engine, image, crop, expected)
+            if read is None:
+                continue
+            how = "forced"
+        for char, found in zip(run, read[1:-1]):
+            char.rect = found.rect
+            char.score = found.score
+        repaired += len(run)
+        if stats is not None:
+            stats[how] = stats.get(how, 0) + len(run)
+    return repaired
+
+
+def forced_placement(
+    engine: CharacterOCR,
+    image: Any,
+    crop: tuple[float, float, float, float],
+    expected: list[VisibleChar],
+    min_score: float = FORCED_MIN_SCORE,
+) -> list[OCRChar] | None:
+    """Fall back to CTC forced alignment when the re-read still drops a character, and vet what it returns.
+
+    Accepted only if both known neighbours land back inside their own boxes and every missing character got
+    at least min_score from the model on the columns assigned to it - a character that is not printed there
+    gets next to nothing, so a Markdown slip is not given a place on the page.
+    """
+    align = getattr(engine, "force_align", None)
+    if align is None:
+        return None
+    placed = align(image, crop, "".join(char.value for char in expected))
+    if not placed or len(placed) != len(expected):
+        return None
+    for known, found in ((expected[0], placed[0]), (expected[-1], placed[-1])):
+        centre = (found.rect[0] + found.rect[2]) / 2
+        if not known.rect[0] <= centre <= known.rect[2]:
+            return None
+    if any(found.score is None or found.score < min_score for found in placed[1:-1]):
+        return None
+    return placed
+
+
 def union_rect(rects: Iterable[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
     values = list(rects)
     return (
@@ -1965,6 +2458,7 @@ def write_outputs(
         mapped_characters = 0
         scored_characters = 0
         candidate_characters = 0
+        unlocated_characters = 0
         total_characters = 0
         page_map: dict[str, int] = {}
         encoded_blocks = []
@@ -1988,7 +2482,9 @@ def write_outputs(
                         scored_characters += 1
                     chars.append([char.source_from, char.source_to, char.physical_page, list(char.rect), char.score])
                 elif character_supported and normalize_units(char.value):
-                    if char.candidate_value and char.candidate_rect:
+                    if not (char.candidate_value and char.candidate_rect):
+                        unlocated_characters += 1
+                    else:
                         candidate_characters += 1
                         candidates.append([
                             char.source_from,
@@ -2097,6 +2593,7 @@ def write_outputs(
             "blocks": len(file_blocks),
             "mappedCharacters": mapped_characters,
             "candidateCharacters": candidate_characters,
+            "unlocatedCharacters": unlocated_characters,
             "scoredCharacters": scored_characters,
             "totalCharacters": total_characters,
             "pageMap": page_map,
@@ -2138,6 +2635,7 @@ def write_outputs(
     total = sum(entry["totalCharacters"] for entry in chapters.values())
     mapped = sum(entry["mappedCharacters"] for entry in chapters.values())
     candidates = sum(entry["candidateCharacters"] for entry in chapters.values())
+    unlocated = sum(entry["unlocatedCharacters"] for entry in chapters.values())
     mapped_blocks = sum(kind_mapped.values())
     report = [
         "# MinerU PDF Sync 映射报告",
@@ -2149,7 +2647,8 @@ def write_outputs(
         f"- 可见字符：{total}",
         f"- 逐字坐标：{mapped}",
         f"- 逐字覆盖率：{(mapped / total * 100 if total else 0):.2f}%",
-        f"- 纠错后可激活的候选坐标：{candidates}",
+        f"- 纠错后可激活的候选坐标：{candidates}（位置已知，两家读法不同，待判定）",
+        f"- 无任何坐标：{unlocated}",
         "",
         "选区内未取得逐字坐标的字符不会被猜测；其余可靠字符仍按行显示，若整个选区均无坐标才退回段落框。",
         "",
@@ -2221,6 +2720,11 @@ def main() -> None:
         "--no-line-detection",
         action="store_true",
         help="Skip line-box recovery; blocks without MinerU line boxes stay unrecognized",
+    )
+    parser.add_argument(
+        "--no-gap-repair",
+        action="store_true",
+        help="Skip re-reading the strip between two placed neighbours for characters whole-line OCR dropped",
     )
     parser.add_argument("--ocr-backend", choices=("paddle", "onnx", "tesseract", "kraken"), default="paddle")
     parser.add_argument(
@@ -2335,11 +2839,21 @@ def main() -> None:
         if args.ocr_backend in {"paddle", "onnx"} and not args.no_line_detection
         else None
     )
+    # 每页 Markdown 标题的字：页眉块只有与它对得上时才当作章名补读。
+    heading_text: dict[int, str] = defaultdict(str)
+    for block in blocks:
+        if block.kind == "heading":
+            for char in block.chars:
+                heading_text[char.physical_page] += normalize_units(char.value)
     mapped = 0
+    repaired = 0
+    repair_stats: dict[str, int] = {}
     for page in page_numbers:
         base_lines = list(model_lines.get(page, []))
         loader = page_image_loader(document, page, args.render_scale)
         if supplementer is not None:
+            base_lines = supplementer.split_tall(page, base_lines, loader, page in rerun_pages)
+            model_lines[page] = base_lines
             # Same block source the region loop below uses, so both see the page the same way.
             extra_lines = supplementer.lines_for(
                 page,
@@ -2347,6 +2861,7 @@ def main() -> None:
                 base_lines,
                 loader,
                 page in rerun_pages,
+                heading_text.get(page, ""),
             )
             if extra_lines:
                 model_lines[page] = base_lines + extra_lines
@@ -2363,6 +2878,10 @@ def main() -> None:
             loader,
         )
         mapped += align_page(chars_by_page[page], ocr_chars, args.writing_mode)
+        if args.ocr_backend in {"paddle", "onnx"} and not args.no_gap_repair:
+            gained = repair_gaps(engine, loader, chars_by_page[page], args.writing_mode, repair_stats)
+            repaired += gained
+            mapped += gained
 
     image_offsets: dict[int, int] = defaultdict(int)
     for block in blocks:
@@ -2410,7 +2929,13 @@ def main() -> None:
         # Only a book-relative configuration path is recorded; machine paths never enter the vault.
         {"config": Path(args.rebuild_config).as_posix()} if args.rebuild_config else None,
     )
-    detected = f" detectedLinePages={supplementer.pages} detectedLines={supplementer.lines}" if supplementer else ""
+    detected = (
+        f" detectedLinePages={supplementer.pages} detectedLines={supplementer.lines} splitLines={supplementer.split}"
+        if supplementer else ""
+    )
+    detected += (
+        f" gapRepaired={repaired} gapReread={repair_stats.get('reread', 0)} gapForced={repair_stats.get('forced', 0)}"
+    )
     device = ""
     if hasattr(engine, "describe"):
         # Windows 控制台是 GBK，显卡名里的非 ASCII 字符会直接让 print 抛异常。
