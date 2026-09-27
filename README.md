@@ -1,6 +1,11 @@
-# md1012（原名 mineru）
+# md1012
 
-通过 [MinerU](https://github.com/opendatalab/MinerU) 精准解析 API 获取 PDF 解析产物，再整理成高质量 Markdown（Obsidian 格式，也适合喂给 AI）的 Claude Code skill。
+一套将 PDF（教材、论文、专著、竖排繁体古籍扫描件）转为史学研究可用的可信、高质量 Markdown 的工作流（Claude Code skill），产出 Obsidian 笔记，也适合喂给 AI。
+
+- **可信**：忠于原书，改字须有 PDF 原图为据并另出校注，改动报告由脚本逐字比对生成。
+- **高质量**：带脚注、多级标题、页码、图表、标点等信息。
+
+底稿通过 [MinerU](https://github.com/opendatalab/MinerU) 精准解析 API 取得；竖排古籍等 MinerU 读不好的书，可改用本机 PaddleOCR-VL。
 
 ## 解决什么问题
 
@@ -63,7 +68,7 @@ scripts/
   vl_build.py                 VL 作底稿时整理 Markdown（推断页码、按分隔线认注、拦编造内容）
   structure_audit.py          结构核查：注区核对材料、目录对篇题、按页任务、按页改动执行（定位串须唯一）、注号重编
   note_tasks.py               读丢的注号（<!--?fnref n-->）按页出任务、放回
-  doubt_sheets.py             不经插件：按映射截疑字原图（横排整行、竖排整列）、拼图、给站长的分组拼图
+  doubt_sheets.py             不经插件：按映射截疑字原图（横排整行、竖排整列）、拼图、给用户的分组拼图
   apply_doubts.py             不经插件：把 AI 判定结果按偏移写回正文（从后往前、核对原字、备份）
   doubt_crops.py、apply_judgement.js 等   经笔记1012 插件的疑字判定（书在 Obsidian 库里时）
 references/
