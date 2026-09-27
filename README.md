@@ -28,7 +28,7 @@ MinerU 会输出一份 `full.md`，但它把页眉、页码、**脚注**标记�
 python scripts/mineru_api.py configure                    # 首次安全保存 API Token
 python scripts/mineru_api.py submit a.pdf -o <书>/_数据/MinerU原始   # 上传、轮询、下载并解压
 python scripts/mineru_api.py usage                        # 本机估算的当日额度
-python scripts/probe.py <mineru输出目录>              # 探查 + 六项自动检查
+python scripts/probe.py <mineru输出目录>              # 探查 + 七类自动检查
 python scripts/build.py <目录> -o <书>/_数据/过程报告/_skeleton.md   # 重建骨架
 python scripts/split_book.py <骨架.md> -o <书> --meta book=书名      # 正文合成一份，卷首书末另存，出索引
 python scripts/verify.py <成品.md>                    # 结构自检
@@ -42,11 +42,12 @@ python scripts/crop_pdf.py <origin.pdf> --page 2 --rect 65,545,300,559 -o crop.p
 
 精准 API 单文件限制为 200 MB、200 页。`mineru_api.py` 会保留原 PDF，以页面对象复制方式无损拆分超限文件，并在输出目录的 `_upload_cache/` 按来源指纹复用分卷；完成后报告当日本机追踪的解析文件数、页数和估算剩余额度。官方当前定义是每日解析文件总数由基础额度与额外申请额度相加（默认 5000 份），每日 1000 页高优先级；超出高优先级页数后转入普通队列。官方未提供用量查询端点，因此剩余量明确标为本机估算。
 
-## 三条红线
+## 红线
 
 1. **不给正文补字。** 学术文献以原刊为准；疑似脱字只标注，经用户许可才改。
 2. **改动原文前先核 PDF 原图。** 分不清是原刊印错还是 OCR 认错，就没资格决定改不改。
-3. **改动报告必须由 `diff_report.py` 生成，不能靠回忆。** 曾有一次标点规范化脚本的正则 bug 静默删掉约 85 处括号内容，全靠它揪出来。
+3. **所有内容层改动都主动告诉用户，改动报告由 `diff_report.py` 生成，不靠回忆。** 曾有一次标点规范化脚本的正则 bug 静默删掉约 85 处括号内容，全靠它揪出来。
+4. **已入库的正文默认只读。** 只有用户明确要求的校勘流程才改正文，且每处改动都记进校勘账本；用户自己的标注一律保留。
 
 ## 结构
 
@@ -54,7 +55,7 @@ python scripts/crop_pdf.py <origin.pdf> --page 2 --rect 65,545,300,559 -o crop.p
 SKILL.md                      主流程
 scripts/
   mineru_api.py               精准 API 配置、上传、轮询、下载、拆分与用量报告
-  probe.py                    探查、圈码↔脚注对齐审计、六项自动检查
+  probe.py                    探查、圈码↔脚注对齐审计、七类自动检查
   build.py                    从 layout.json 重建骨架
   verify.py                   结构自检
   diff_report.py              交付前改动比对

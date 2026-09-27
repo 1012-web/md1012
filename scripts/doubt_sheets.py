@@ -6,7 +6,7 @@ index.json 与各章 sidecar 的 candidates），书文件夹在哪都行。
   crops  全部疑字截图：每个疑字一张「整行/整列」图（红线夹住疑字）与一张单字放大图，每 5 个拼一张 sheet-N.png，
          写 manifest.json（n、file、from/to（UTF-16 偏移）、pdfPage、page（印刷页）、context、minerU（正文现字）、
          ocr（本机 OCR 读法）、alternatives、line、zoom）。交子代理判定，结果 judgement-bK.json 格式同 judging-prompt.md。
-  owner  把要站长拍板的几组编号拼成带说明的图：--groups 是 JSON {"组名": [编号, ...], ...}。
+  owner  把要用户拍板的几组编号拼成带说明的图：--groups 是 JSON {"组名": [编号, ...], ...}。
 
 用法：
   python -X utf8 doubt_sheets.py crops --book <书> --out <书>/_数据/疑字判定
@@ -163,7 +163,7 @@ def owner(folder: Path, groups_path: Path) -> None:
     groups = json.loads(groups_path.read_text(encoding="utf-8"))
     # 整列图竖长、整行图横长：由第一张截图判断这本书的排版方向
     vertical = bool(manifest) and _is_vertical(folder / next(iter(manifest.values()))["line"])
-    out = folder / "站长拍板"
+    out = folder / "用户拍板"
     out.mkdir(exist_ok=True)
     font, small = font_of(22), font_of(17)
     names = []

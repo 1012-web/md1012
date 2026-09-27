@@ -6,7 +6,7 @@
            写 tasks.json：每页一条 {page, file, printed, images, body, notes:[{n, local, text}]}。
   apply    读子代理写的 result-*.json（[{n, after, confidence, reason}]，after 是正文里紧挨注号之前的一串字），
            在那一页正文里找到 after（必须唯一），把 [^n] 插在它后面、删掉对应的待定记号；
-           找不到、不唯一、把握低的一律不动，列进报告交站长。改动前把原文件备份到任务目录。
+           找不到、不唯一、把握低的一律不动，列进报告交用户。改动前把原文件备份到任务目录。
 
 用法：
   python -X utf8 note_tasks.py prepare --book <书文件夹> --config <书>/_数据/config.json --out <任务目录>

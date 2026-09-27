@@ -11,7 +11,7 @@
     const fs = require("fs");
     const path = require("path");
     const dir = options.dir;
-    // 异体字方针由站长每本书开工时选定（SKILL.md「异体字方针」），不设默认：没给或给错就停，不替站长选。
+    // 异体字方针由用户每本书开工时选定（SKILL.md「异体字方针」），不设默认：没给或给错就停，不替用户选。
     if (options.variants !== "keep" && options.variants !== "normalize") {
       throw new Error(`variants must be "keep" or "normalize" (the book's chosen variant policy), got ${JSON.stringify(options.variants)}`);
     }

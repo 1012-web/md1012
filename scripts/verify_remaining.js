@@ -1,7 +1,7 @@
-// 在 Obsidian 里执行：把某书 OCR 疑字清单里剩下的全部认可（站长决定整批放行时用）。
+// 在 Obsidian 里执行：把某书 OCR 疑字清单里剩下的全部认可（用户决定整批放行时用）。
 // 读当前清单笔记的每一行（上下文「前文**字**后文」与定位链接里的文件），按清单的前后文记认可，
 // 不依赖截图时记下的偏移（前面改过字会让偏移挪动）。
-// 参数：window.__verifyRemaining = { title: "书名", by: "站长认可（未核纸本）", basis: "…" }
+// 参数：window.__verifyRemaining = { title: "书名", by: "用户认可（未核纸本）", basis: "…" }
 // 结果写在 window.__verifyRemainingResult。
 (() => {
   window.__verifyRemainingResult = "running";
@@ -42,7 +42,7 @@
       for (const row of list) {
         const key = [row.file, row.before, row.value, row.after].join(String.fromCharCode(0));
         if (verified.some((item) => item.key === key)) continue;
-        verified.push({ key, ...row, verifiedAt: today, by: options.by || "站长认可（未核纸本）", ...(options.basis ? { basis: options.basis } : {}) });
+        verified.push({ key, ...row, verifiedAt: today, by: options.by || "用户认可（未核纸本）", ...(options.basis ? { basis: options.basis } : {}) });
         added += 1;
       }
       await pdf.collation.saveLedger({ ...ledger, verified });

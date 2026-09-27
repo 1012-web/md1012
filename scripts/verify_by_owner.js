@@ -1,4 +1,4 @@
-// 站长核对纸本后认可的疑字：按 doubt_crops 的 manifest 编号写进账本（判定者：站长核对纸本原书）。
+// 用户核对纸本后认可的疑字：按 doubt_crops 的 manifest 编号写进账本（判定者：用户核对纸本原书）。
 // 参数：window.__ownerVerify = { dir, numbers: [17, 28], basis: "纸本原书作入" }；结果写在 window.__ownerVerifyResult
 // 截图之后正文可能又改过（前面改了字位置会挪、上下文里的字也可能变了），所以不按截图时的偏移认可，
 // 而是先重写本书的 OCR 疑字清单，在当前清单里找同一个字：字相同、前或后四个字对得上，取离原位置最近的一处。
@@ -62,7 +62,7 @@
       if (!ledger.verified.some((x) => x.key === key)) {
         await pdf.collation.saveLedger({
           ...ledger,
-          verified: [...ledger.verified, { key, file: hit.file, value: hit.value, before: hit.before, after: hit.after, verifiedAt: today, by: "站长核对纸本原书", basis: options.basis }]
+          verified: [...ledger.verified, { key, file: hit.file, value: hit.value, before: hit.before, after: hit.after, verifiedAt: today, by: "用户核对纸本原书", basis: options.basis }]
         });
       }
       done.push(n);

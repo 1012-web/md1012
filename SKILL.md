@@ -83,16 +83,27 @@ description: 一套将 PDF（教材、论文、专著、竖排繁体古籍扫描
 
 脚本一律把报告写成 UTF-8 文件、stdout 只打一行 ASCII——Windows 控制台是 GBK，中文直接 print 会变乱码。**用 Read 工具读报告文件。**
 
-## 首次使用：选择解析方式
+## 首次使用：一次性的几个问题
 
-当用户**首次要求本 skill 处理 PDF**、但尚未说明如何取得 MinerU 输出时，先提问，不要直接上传文件或假定其已有 Token：
+当用户**首次要求本 skill 处理 PDF**、但尚未说明如何取得 MinerU 输出时，先提问，不要直接上传文件或假定其已有 Token。下面三问合在一轮里问，新用户一次答完，以后不再被打扰：
 
 > 你希望怎样取得 MinerU 解析输出？
 >
-> 1. **推荐：使用 MinerU API**。我会引导你在本机安全配置一次 API Token，随后自动提交、等待、下载和解压。
-> 2. 使用 MinerU 桌面软件手动解析。请完成解析并将完整解压输出目录交给我，我再负责重建 Markdown、脚注和校验。
+> 1. **推荐：使用 MinerU API**。我会引导你在本机安全配置一次 API Token，随后自动提交、等待、下载和解压。**注意：PDF 会上传到 MinerU 的云端服务解析。** 未刊稿、有版权或保密顾虑的材料，请选第 2 项。
+> 2. 使用 MinerU 桌面软件手动解析（文件不出本机）。请完成解析并将完整解压输出目录交给我，我再负责重建 Markdown、脚注和校验。
 
-同一次首次使用里，接着问第二个问题（已装好本地 OCR 环境、或 `%APPDATA%\mineru-skill\config.json`（其他平台为 `~/.config/mineru-skill/config.json`）里已记录 `char_sync_preference` 时跳过）：
+上传这件事必须在这里说在前面：新用户不一定知道文件会离开本机，这是最不该让人事后才发现的事。
+
+第二问，成品放在哪（config.json 里已记录 `library_root` 时跳过）：
+
+> 整理好的书放在哪里？
+>
+> 1. **推荐：Obsidian 库里的某个文件夹**（请给路径）。脚注、双链、页码锚点都按 Obsidian 写法，以后还能配合笔记1012 插件做逐字映射与校勘。
+> 2. 普通文件夹（请给路径）。照样是标准 Markdown，只是用不了插件那一路功能。
+
+书文件夹的位置决定双链写法、能不能走插件那一路，所以要先定。答案写进 config.json 的 `library_root`（Obsidian 库时另记 `vault_root`）；每本书的文件夹建在它下面。
+
+第三问（已装好本地 OCR 环境、或 `%APPDATA%\mineru-skill\config.json`（其他平台为 `~/.config/mineru-skill/config.json`）里已记录 `char_sync_preference` 时跳过）：
 
 > 要不要安装本地 OCR 环境（PaddleOCR，推荐）？
 >
@@ -103,7 +114,14 @@ description: 一套将 PDF（教材、论文、专著、竖排繁体古籍扫描
 > 1. **推荐：安装**
 > 2. 暂不安装（以后要用时再装）
 
-用户选安装：按 [references/character-sync.md](references/character-sync.md) 建隔离环境、装 `scripts/sync-requirements.txt`，用一两页样本跑通后再说装好。无论选哪项，把结果写进上述 config.json 的 `char_sync_preference`（`"installed"` / `"declined"`），只增这一个键，不动其他内容；此后不再重复提问。
+用户选安装：按 [references/character-sync.md](references/character-sync.md) 建隔离环境、装 `scripts/sync-requirements.txt`，用一两页样本跑通后再说装好。无论选哪项，把结果写进上述 config.json 的 `char_sync_preference`（`"installed"` / `"declined"`）。config.json 只增改本节提到的这几个键，不动其他内容；此后不再重复提问。
+
+**能自己查的不问用户**，到用得着时再查：
+
+- 显卡：要用 PaddleOCR-VL 时按 [references/vl.md](references/vl.md)「显卡」一段自己检测（N 卡、A 卡或只有 CPU），据此选加速方式。
+- 笔记1012 插件：要走插件那一路时，看库里有没有 `.obsidian/plugins/note1012/manifest.json`；没有就说明缺什么、改走不经插件的路，不替用户装。
+- 操作系统、Python 版本：直接检测。
+- 会花额度的事（如 AI 看原图判定疑字）在要跑的那一刻问：按页数或疑字数，引 [references/ai-judging.md](references/ai-judging.md)「花费参考」给出估算，用户同意才跑。
 
 用户在同一对话中已经选过路线，或已明确要求 API / 桌面软件时，不重复询问。用户选择 API 后走下方“精准解析 API”流程；选择桌面软件后，等待其提供已经解压的完整 MinerU 输出目录。用户一开始给的就是该输出目录时，直接从“探查与审计”开始。
 

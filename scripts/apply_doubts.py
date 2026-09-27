@@ -2,7 +2,7 @@
 
 读 <判定目录>/manifest.json（doubt_sheets.py crops 写的）与全部 judgement-b*.json，按 references/ai-judging.md 的执行规则：
 把握高的 B/C 改成原书的字（有 variant 时按异体字方针：keep 用原书字形、normalize 用规范字）；A 认可；
-把握低或 D 不动、列给站长；A 且 misprint 照录原书、列进校记。
+把握低或 D 不动、列给用户；A 且 misprint 照录原书、列进校记。
 
 位置用截图时记的 UTF-16 偏移：改前核对该处仍是 manifest 里的正文字，对不上就不改、记 mismatch；
 同一文件从后往前改，前面的改动不会让后面的位置挪动。所以判定之后、执行之前，正文不能先动别的地方。
