@@ -71,6 +71,39 @@ def test_build_replaces_hidden_text_keeps_image_and_leaves_unlisted_pages(tmp_pa
         assert a[0].get_pixmap(dpi=72).samples == b[0].get_pixmap(dpi=72).samples
 
 
+def vertical_spec() -> dict:
+    """两列竖排：右列「治生治産，的」（逗号只占半格、前后留缝），左列「下層」。"""
+    right = [["治", 0.80, 0.10, 0.86, 0.16], ["生", 0.80, 0.16, 0.86, 0.22], ["治", 0.80, 0.22, 0.86, 0.28],
+             ["産", 0.80, 0.28, 0.86, 0.34], ["，", 0.80, 0.34, 0.86, 0.37], ["的", 0.80, 0.40, 0.86, 0.46]]
+    left = [["下", 0.70, 0.10, 0.76, 0.16], ["層", 0.70, 0.16, 0.76, 0.22]]
+    return {"version": 1, "bookId": "book", "pdf": "书.pdf", "writingMode": "vertical-rl", "pages": {"1": right + left}}
+
+
+def test_vertical_build_writes_one_line_per_column(tmp_path: Path) -> None:
+    source = tmp_path / "书.pdf"
+    make_pdf(source)
+    output = tmp_path / "校订版.pdf"
+
+    report = MODULE.build(source, vertical_spec(), output)
+
+    assert report["writingMode"] == "vertical-rl"
+    assert report["lowestMatch"] == 1.0
+    with pymupdf.open(output) as doc:
+        lines = [line for line in doc[0].get_text().split("\n") if line.strip()]
+        # 整列一行、列内不插空格（逗号后那道缝接上了），列序从右到左
+        assert lines == ["治生治産，的", "下層"]
+        words = doc[0].get_text("rawdict")["blocks"]
+        chars = [c for b in words for l in b.get("lines", []) for s in l["spans"] for c in s["chars"]]
+        first = chars[0]["bbox"]
+        # 每个字仍落在自己的框里（页面 200x100）
+        assert first[0] == pytest.approx(160, abs=3) and first[1] == pytest.approx(10, abs=2)
+
+
+def test_split_columns_starts_a_column_when_the_text_goes_back_up() -> None:
+    columns = MODULE.split_columns(vertical_spec()["pages"]["1"])
+    assert ["".join(item[0] for item in column) for column in columns] == ["治生治産，的", "下層"]
+
+
 def test_page_whose_text_is_visible_is_kept(tmp_path: Path) -> None:
     source = tmp_path / "书.pdf"
     make_pdf(source)

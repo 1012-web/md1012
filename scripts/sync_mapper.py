@@ -56,6 +56,12 @@ LEADER_DOT_CHARS = frozenset(".·•‧・⋯")
 # 「卷一〇」的〇，识别模型常读成字母 O 或数字 0。对齐时两侧都折成同一个单元：只影响「这是不是同一个
 # 位置」的判断，写出的字仍是 Markdown 原字；两侧同折，真正的 0 与 O 之间照样互相对得上。
 ZERO_LOOKALIKES = {"〇": "〇", "○": "〇", "O": "〇", "o": "〇", "0": "〇"}
+# 本书字形表（--variant-equivalents）：站长按「保留原书字形」定了方针、且逐组裁原图核实过的异体对，
+# 对齐时两侧折成同一个单元（「黄」与识别模型读出的「黃」算同一个字位），这些字就拿到正常坐标，
+# 不再被当成「两家读法不同」的疑字。写出的字仍是 Markdown 原字。空表 = 不折叠，行为与从前一致。
+VARIANT_EQUIVALENTS: dict[str, str] = {}
+# 推定坐标只给这些字（识别模型在竖排里常整批漏读的标点、注号）；普通汉字漏读宁可留空，不猜。
+ESTIMATABLE_CHARS = frozenset("，。、；：！？「」『』《》（）〔〕…—·,.;:!?()[]")
 PAGE_RANGE_HINT = "page range offset must look like 'file|start-end|offset': "
 FILE_OFFSET_HINT = "file offset must look like 'file|offset': "
 PAGE_OVERRIDE_HINT = "page override must look like 'file|printed|physical': "
@@ -116,6 +122,10 @@ class VisibleChar:
     # 识别置信度（0–1）：映射到的那个 OCR 字、以及读法不一致时 OCR 那一读的把握。只有能给出逐字概率的后端才有
     score: float | None = None
     candidate_score: float | None = None
+    # 推定坐标：识别模型没读出这个字（多为竖排标点），按同块前后邻字的位置推出来的框。
+    # 单独写进 sidecar 的 estimated，不进 chars：插件定位只认读出来的字位，推定框只给文字层等下游用。
+    estimated_rect: tuple[float, float, float, float] | None = None
+    estimated_page: int | None = None
 
 
 @dataclass
@@ -208,7 +218,8 @@ def normalized_chars(chars: Iterable[VisibleChar | OCRChar]) -> tuple[str, list[
     owners: list[tuple[Any, ...]] = []
     for char in chars:
         for unit in normalize_units(char.value):
-            units.append(ZERO_LOOKALIKES.get(unit, unit))
+            unit = ZERO_LOOKALIKES.get(unit, unit)
+            units.append(VARIANT_EQUIVALENTS.get(unit, unit))
             owners.append((char,))
     return collapse_dot_leaders(units, owners)
 
@@ -1943,8 +1954,39 @@ def fallback_block_lines(
     return project_block_rows(image, rect, line_height) or [rect]
 
 
+def transpose_rect(rect: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """横纵互换：竖排的一列在转置后的坐标里就是一行。"""
+    return (rect[1], rect[0], rect[3], rect[2])
+
+
+class TransposedDetector:
+    """让检测模型照旧看正着的图：收到转置图的裁块先转回来检测，得到的多边形再换算到转置坐标。"""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def detect(self, image: Any) -> list[list[tuple[float, float]]]:
+        import numpy as np
+
+        upright = np.ascontiguousarray(np.swapaxes(image, 0, 1))
+        return [[(point[1], point[0]) for point in polygon] for polygon in self.inner.detect(upright)]
+
+
+def transposed_loader(loader: Callable[[], Any]) -> Callable[[], Any]:
+    def load() -> Any:
+        import numpy as np
+
+        return np.ascontiguousarray(np.swapaxes(loader(), 0, 1))
+    return load
+
+
 class LineSupplementer:
-    """Recover missing line boxes block by block, caching the result so a repeat run need not even render the page."""
+    """Recover missing line boxes block by block, caching the result so a repeat run need not even render the page.
+
+    竖排（vertical-rl）时整套按行的规则（同行合并、按行高投影、行间空档、过高行拆分）在转置坐标里运行：
+    页面图与所有框横纵互换，一列就成了一行；检测模型仍看正着的图（TransposedDetector），结果再换回来。
+    不这样做，左右并排的几列上下完全重叠，会被「同一行合并」并成一个大框。
+    """
 
     def __init__(
         self,
@@ -1962,11 +2004,19 @@ class LineSupplementer:
         self.pages = 0
         self.lines = 0
         self.split = 0
+        self.transposed = False
 
     def detector_instance(self) -> Any:
         if self.detector is None:
             self.detector = self.factory()
-        return self.detector
+        return TransposedDetector(self.detector) if self.transposed else self.detector
+
+    def in_transposed_space(self, run: Callable[[], list[tuple[float, float, float, float]]]) -> list[tuple[float, float, float, float]]:
+        self.transposed = True
+        try:
+            return [transpose_rect(line) for line in run()]
+        finally:
+            self.transposed = False
 
     def plan_digest(
         self,
@@ -1996,6 +2046,11 @@ class LineSupplementer:
         force: bool = False,
     ) -> list[tuple[float, float, float, float]]:
         """Return the page's line set with every over-tall line box replaced by the single lines inside it."""
+        if self.writing_mode == "vertical-rl" and not self.transposed:
+            flipped = [transpose_rect(line) for line in lines]
+            return self.in_transposed_space(
+                lambda: self.split_tall(page, flipped, transposed_loader(image_loader), force)
+            )
         known = list(lines)
         tall = tall_lines(known)
         if not tall:
@@ -2028,6 +2083,15 @@ class LineSupplementer:
         force: bool = False,
         heading_text: str = "",
     ) -> list[tuple[float, float, float, float]]:
+        if self.writing_mode == "vertical-rl" and not self.transposed:
+            flipped_blocks = [
+                LayoutBlock(block.page, transpose_rect(block.rect), block.text, block.kind) for block in blocks
+            ]
+            flipped_lines = [transpose_rect(line) for line in lines]
+            found = self.in_transposed_space(lambda: self.lines_for(
+                page, flipped_blocks, flipped_lines, transposed_loader(image_loader), force, heading_text
+            ))
+            return ordered_lines(found, self.writing_mode)
         known = list(lines)
         page_blocks = list(blocks)
         pending = blocks_missing_lines(page_blocks, known, heading_text)
@@ -2073,7 +2137,7 @@ class LineSupplementer:
                 rows = strip_rows(image, band, reference, known)
                 known.extend(rows)
                 found.extend(rows)
-            extra = ordered_lines(found, self.writing_mode)
+            extra = ordered_lines(found, "horizontal-tb" if self.transposed else self.writing_mode)
             write_text_atomic(cache, json.dumps([list(line) for line in extra], ensure_ascii=False))
         self.pages += 1
         self.lines += len(extra)
@@ -2383,6 +2447,108 @@ def forced_placement(
     return placed
 
 
+def parse_variant_equivalents(values: Iterable[str]) -> dict[str, str]:
+    """「黄黃」「説說」这样的组：每组第一个字是本书原书字形，其余字对齐时折成它。"""
+    table: dict[str, str] = {}
+    for value in values:
+        group = [normalize_units(char) for char in value if not char.isspace()]
+        if len(group) < 2 or any(len(char) != 1 for char in group):
+            raise SystemExit(f"variant equivalents must be groups of single characters like '黄黃': {value!r}")
+        canonical = group[0]
+        for char in group:
+            if table.get(char, canonical) != canonical:
+                raise SystemExit(f"character {char!r} appears in two variant groups")
+            table[char] = canonical
+    return {char: canonical for char, canonical in table.items() if char != canonical}
+
+
+def format_variant_table() -> str:
+    groups: dict[str, list[str]] = defaultdict(list)
+    for char, canonical in VARIANT_EQUIVALENTS.items():
+        groups[canonical].append(char)
+    return "、".join(canonical + "＝" + "".join(sorted(chars)) for canonical, chars in sorted(groups.items()))
+
+
+def estimate_missing(blocks: Iterable[MarkdownBlock], writing_mode: str = "horizontal-tb") -> int:
+    """给识别模型没读出的标点、注号推一个框：同一块里沿书写方向找最近的已定位邻字。
+
+    同一行（竖排是同一列）里夹在两个邻字之间的，从前一字往后按常规字距排，缝不够就等比压缩，
+    绝不拉伸；不在同一行的，标点贴在前一字之后（竖排标点落在前一字下方的半格里），没有前一字才贴
+    后一字之前。只处理 ESTIMATABLE_CHARS；汉字漏读宁可留空。推定框写进 estimated，与读出的字位分开。
+    """
+    vertical = writing_mode == "vertical-rl"
+    flow = (1, 3) if vertical else (0, 2)
+    cross = (0, 2) if vertical else (1, 3)
+
+    def anchor(char: VisibleChar) -> tuple[int, tuple[float, float, float, float]] | None:
+        if char.rect:
+            return char.physical_page, char.rect
+        if char.candidate_rect:
+            return char.physical_page, char.candidate_rect
+        return None
+
+    def same_line(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
+        shared = min(first[cross[1]], second[cross[1]]) - max(first[cross[0]], second[cross[0]])
+        narrow = min(first[cross[1]] - first[cross[0]], second[cross[1]] - second[cross[0]])
+        return narrow > 0 and shared > 0.5 * narrow
+
+    def place(base: tuple[float, ...], start: float, end: float) -> tuple[float, float, float, float]:
+        box = [0.0, 0.0, 0.0, 0.0]
+        box[cross[0]], box[cross[1]] = base[cross[0]], base[cross[1]]
+        box[flow[0]], box[flow[1]] = round(max(0.0, start), 6), round(min(1.0, end), 6)
+        return (box[0], box[1], box[2], box[3])
+
+    estimated = 0
+    for block in blocks:
+        chars = [char for char in block.chars if normalize_units(char.value)]
+        anchors = [anchor(char) for char in chars]
+        extents = sorted(rect[flow[1]] - rect[flow[0]] for item in anchors if item for rect in (item[1],))
+        if not extents:
+            continue
+        pitch = extents[len(extents) // 2]
+        index = 0
+        while index < len(chars):
+            if anchors[index] is not None:
+                index += 1
+                continue
+            end = index
+            while end < len(chars) and anchors[end] is None:
+                end += 1
+            run = [char for char in chars[index:end]]
+            if all(normalize_units(char.value) in ESTIMATABLE_CHARS for char in run):
+                before = anchors[index - 1] if index > 0 else None
+                after = anchors[end] if end < len(chars) else None
+                sizes = [0.5 * pitch] * len(run)
+                boxes: list[tuple[float, float, float, float]] = []
+                page = None
+                if before and after and before[0] == after[0] and same_line(before[1], after[1]) \
+                        and after[1][flow[0]] - before[1][flow[1]] > 0.1 * pitch:
+                    scale = min(1.0, (after[1][flow[0]] - before[1][flow[1]]) / sum(sizes))
+                    cursor = before[1][flow[1]]
+                    for size in sizes:
+                        boxes.append(place(before[1], cursor, cursor + size * scale))
+                        cursor += size * scale
+                    page = before[0]
+                elif before:
+                    cursor = before[1][flow[1]]
+                    for size in sizes:
+                        boxes.append(place(before[1], cursor, cursor + size))
+                        cursor += size
+                    page = before[0]
+                elif after:
+                    cursor = after[1][flow[0]]
+                    for size in reversed(sizes):
+                        boxes.insert(0, place(after[1], cursor - size, cursor))
+                        cursor -= size
+                    page = after[0]
+                for char, box in zip(run, boxes):
+                    if box[2] > box[0] and box[3] > box[1]:
+                        char.estimated_rect, char.estimated_page = box, page
+                        estimated += 1
+            index = end
+    return estimated
+
+
 def union_rect(rects: Iterable[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
     values = list(rects)
     return (
@@ -2459,6 +2625,7 @@ def write_outputs(
         scored_characters = 0
         candidate_characters = 0
         unlocated_characters = 0
+        estimated_characters = 0
         total_characters = 0
         page_map: dict[str, int] = {}
         encoded_blocks = []
@@ -2471,6 +2638,7 @@ def write_outputs(
             chars = []
             candidates = []
             missing = []
+            estimated = []
             character_supported = block.kind not in {"image", "table"}
             for char in block.chars:
                 page_map[str(char.printed_page)] = char.physical_page
@@ -2496,6 +2664,14 @@ def write_outputs(
                             char.candidate_score,
                         ])
                     missing.append([char.source_from, char.source_to])
+                    if char.estimated_rect and char.estimated_page is not None:
+                        estimated_characters += 1
+                        estimated.append({
+                            "from": char.source_from,
+                            "to": char.source_to,
+                            "page": char.estimated_page,
+                            "rect": list(char.estimated_rect),
+                        })
             encoded_regions = [[page, list(rect)] for page, rect in block.regions]
             encoded_lines = [[page, list(rect)] for page, rect in block.lines]
             block_exact = bool(block.regions) and character_supported and not missing
@@ -2555,6 +2731,8 @@ def write_outputs(
                     for start, end, value, page, rect, alternatives, score in candidates
                 ],
                 "missing": missing,
+                # 推定框（missing 里的一部分）：插件定位不用它，文字层等下游按需取用
+                **({"estimated": estimated} if estimated else {}),
                 **(
                     {"ocrText": block_ocr_text(block)}
                     if any(char.candidate_value for char in block.chars)
@@ -2594,6 +2772,7 @@ def write_outputs(
             "mappedCharacters": mapped_characters,
             "candidateCharacters": candidate_characters,
             "unlocatedCharacters": unlocated_characters,
+            "estimatedCharacters": estimated_characters,
             "scoredCharacters": scored_characters,
             "totalCharacters": total_characters,
             "pageMap": page_map,
@@ -2636,6 +2815,7 @@ def write_outputs(
     mapped = sum(entry["mappedCharacters"] for entry in chapters.values())
     candidates = sum(entry["candidateCharacters"] for entry in chapters.values())
     unlocated = sum(entry["unlocatedCharacters"] for entry in chapters.values())
+    estimated_total = sum(entry["estimatedCharacters"] for entry in chapters.values())
     mapped_blocks = sum(kind_mapped.values())
     report = [
         "# MinerU PDF Sync 映射报告",
@@ -2648,7 +2828,8 @@ def write_outputs(
         f"- 逐字坐标：{mapped}",
         f"- 逐字覆盖率：{(mapped / total * 100 if total else 0):.2f}%",
         f"- 纠错后可激活的候选坐标：{candidates}（位置已知，两家读法不同，待判定）",
-        f"- 无任何坐标：{unlocated}",
+        f"- 无任何坐标：{unlocated}（其中 {estimated_total} 个标点、注号按邻字推定了位置，只供文字层用，不计入逐字覆盖）",
+        *([f"- 本书字形表（对齐时视为同字）：{format_variant_table()}"] if VARIANT_EQUIVALENTS else []),
         "",
         "选区内未取得逐字坐标的字符不会被猜测；其余可靠字符仍按行显示，若整个选区均无坐标才退回段落框。",
         "",
@@ -2745,6 +2926,17 @@ def main() -> None:
         help="DirectML adapter index; overrides the automatic choice (0 is often the integrated GPU)",
     )
     parser.add_argument("--writing-mode", choices=("horizontal-tb", "vertical-rl"), default="horizontal-tb")
+    parser.add_argument(
+        "--variant-equivalent",
+        action="append",
+        default=[],
+        help="book glyph table: a group like 黄黃 (printed form first); aligned as one character. Repeatable",
+    )
+    parser.add_argument(
+        "--no-estimate",
+        action="store_true",
+        help="Do not estimate boxes for punctuation the recognizer skipped (estimated boxes never enter chars)",
+    )
     parser.add_argument("--tesseract-lang", default="chi_sim")
     parser.add_argument("--kraken-model")
     parser.add_argument("--cpu-threads", type=int, default=9)
@@ -2756,6 +2948,8 @@ def main() -> None:
              "every other page is still loaded and the whole book is rebuilt",
     )
     args = parser.parse_args()
+    VARIANT_EQUIVALENTS.clear()
+    VARIANT_EQUIVALENTS.update(parse_variant_equivalents(args.variant_equivalent))
 
     vault = args.vault.resolve()
     pdf_file = vault / Path(args.pdf)
@@ -2914,6 +3108,8 @@ def main() -> None:
                     if line in marked_interlinear:
                         block.line_roles[(page, line)] = "interlinear"
 
+    estimated = 0 if args.no_estimate else estimate_missing(blocks, args.writing_mode)
+
     write_outputs(
         markdown_dir.resolve(),
         output_dir.resolve(),
@@ -2942,7 +3138,7 @@ def main() -> None:
         device = " device=" + engine.describe().encode("ascii", "backslashreplace").decode("ascii")
     print(
         f"backend={args.ocr_backend}{device} pages={len(page_numbers)} "
-        f"blocks={len(blocks)} mapped={mapped}{detected}"
+        f"blocks={len(blocks)} mapped={mapped} estimated={estimated}{detected}"
     )
 
 

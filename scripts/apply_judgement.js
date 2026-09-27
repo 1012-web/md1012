@@ -1,6 +1,6 @@
 // 在 Obsidian 里执行（经 Obsidian 命令行 eval 读入本文件）：按「AI 看原图判定」的结果改正文、写账本。
 // 用法（先设参数再读入本文件）：
-//   window.__judgement = { dir: "C:/Users/yan/.mineru-pdf-sync/doubt-trial", variants: "normalize" | "keep", by: "AI 看原图判定" };
+//   window.__judgement = { dir: "C:/Users/yan/.mineru-pdf-sync/doubt-trial", variants: "normalize" | "keep"（必填，按该书选定的异体字方针）, by: "AI 看原图判定" };
 //   eval(require("fs").readFileSync("<本文件>", "utf8"))
 // dir 里要有 doubt_crops.py 写的 manifest.json 与判定结果 judgement.json（格式见 references/ai-judging.md）。
 // 结果写在 window.__judgementResult（JSON 字符串）。需要笔记1012 插件（note1012）的 PDF 模块。
@@ -11,7 +11,11 @@
     const fs = require("fs");
     const path = require("path");
     const dir = options.dir;
-    const variants = options.variants === "keep" ? "keep" : "normalize";
+    // 异体字方针由站长每本书开工时选定（SKILL.md「异体字方针」），不设默认：没给或给错就停，不替站长选。
+    if (options.variants !== "keep" && options.variants !== "normalize") {
+      throw new Error(`variants must be "keep" or "normalize" (the book's chosen variant policy), got ${JSON.stringify(options.variants)}`);
+    }
+    const variants = options.variants;
     const by = options.by || "AI 看原图判定";
     const today = new Date().toISOString().slice(0, 10);
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));

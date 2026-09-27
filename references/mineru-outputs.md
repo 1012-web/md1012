@@ -106,3 +106,10 @@ t = b.get('text') or join_lines(line_texts(b))
 **图里标点清清楚楚、提取出来却是空格 → 文字层坏了。** 这时最好的办法是 `crop_pdf.py --strip-text-layer` 光栅化后重跑 MinerU 走 OCR，拿到的是原文标点，远胜模型推断。
 
 有意思的是同一页里**部分标点能正常提取**（会以 `<sub>；</sub>` 这种形式出现），那些正是编码没坏的字符。所以看到 `<sub>` 包着标点不要奇怪，那是好事。
+
+## 图片拷贝（copy_images.py）
+
+- 只复制成品 Markdown 真正引用到的图片；MinerU 多吐出来的页眉、装饰图、重复裁图留在原目录，报告里列为 orphans。
+- 认得的引用写法：`![alt](images/x.png "标题")`、`![](<images/含 空格.png>)`、`%20` 之类的 URL 转义、`![[x.png|300]]`、带引号或不带引号的 `<img src=...>`、`[ref]: images/x.png` 这种引用式定义；扩展名覆盖 png/jpg/jpeg/gif/webp/bmp/jp2/svg/tif/tiff/avif。
+- 源目录下所有 `images/` 目录一并收集合并（拆卷解析会有好几个），所以多段源只需对每个成品目录跑一次，不必按分卷跑。
+- 退出码：3 = 已有同名不同内容的文件（不覆盖），或不同分卷出现同名但内容不同的图片（报告到 `sourceDuplicates`，不猜）；2 = 命令行用法错误。

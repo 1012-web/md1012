@@ -154,6 +154,19 @@ def load_config(path: Path) -> dict:
             handle.read()
     if raw.get("writingMode", "horizontal-tb") not in {"horizontal-tb", "vertical-rl"}:
         raise ValueError("Unsupported writingMode")
+    variants = raw.get("variantEquivalents", [])
+    # 本书字形表：每组一个字符串，第一个字是原书字形，如 ["黄黃", "説說"]；一个字只能出现在一组里
+    if not isinstance(variants, list) or not all(isinstance(group, str) for group in variants):
+        raise ValueError("variantEquivalents must be a list of strings such as '黄黃'")
+    seen: dict[str, int] = {}
+    for number, group in enumerate(variants):
+        chars = [char for char in group if not char.isspace()]
+        if len(chars) < 2:
+            raise ValueError(f"variantEquivalents group {group!r} needs the printed form and at least one variant")
+        for char in chars:
+            if seen.get(char, number) != number:
+                raise ValueError(f"variantEquivalents: {char!r} appears in two groups")
+            seen[char] = number
     if not isinstance(raw["printedPageOffset"], int):
         raise ValueError("printedPageOffset must be an integer")
     validate_offsets(raw, files)
@@ -264,6 +277,8 @@ def command_args(config: dict, output: Path, cache: Path, rerun: str | None) -> 
             "--rec-model", config.get("recognitionModel", "PP-OCRv5_mobile_rec"),
             "--rec-batch-size", str(config.get("recBatchSize", 16)),
             "--render-scale", str(config.get("renderScale", 2.0))]
+    for group in config.get("variantEquivalents", []):
+        args.extend(["--variant-equivalent", group])
     if config.get("ocrBackend", "paddle") == "onnx":
         args.extend(["--onnx-model", config.get("onnxModel", DEFAULT_ONNX_MODEL),
                      "--onnx-device", config.get("onnxDevice", "auto")])

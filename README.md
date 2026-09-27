@@ -54,14 +54,31 @@ scripts/
   verify.py                   结构自检
   diff_report.py              交付前改动比对
   crop_pdf.py                 裁图核对 / 剥离文字层供重跑 OCR
+  pdf_sync.py、sync_mapper.py 逐字映射（本书字形表、推定坐标、竖排补行框）
+  textlayer_spec.py           从逐字映射导出文字层清单（横排竖排都行）
+  pdf_textlayer.py            按清单重建 PDF 隐形文字层（竖排整列一行）
+  vl_parse.py                 PaddleOCR-VL 逐页再读（本机 llama.cpp，A 卡走 Vulkan）
+  vl_supplement.py            VL 找到而 MinerU 漏掉的块 → 补充行框
+  vl_compare.py               正文与 VL 逐页比对，出疑字线索
+  vl_build.py                 VL 作底稿时整理 Markdown（推断页码、按分隔线认注、拦编造内容）
+  structure_audit.py          结构核查：注区核对材料、目录对篇题、按页任务、按页改动执行（定位串须唯一）、注号重编
+  note_tasks.py               读丢的注号（<!--?fnref n-->）按页出任务、放回
+  doubt_sheets.py             不经插件：按映射截疑字原图（横排整行、竖排整列）、拼图、给站长的分组拼图
+  apply_doubts.py             不经插件：把 AI 判定结果按偏移写回正文（从后往前、核对原字、备份）
+  doubt_crops.py、apply_judgement.js 等   经笔记1012 插件的疑字判定（书在 Obsidian 库里时）
 references/
   mineru-api.md               精准 API 限制、端点、配置与报告语义
   mineru-outputs.md           六个产物文件各自有什么、缺什么
   templates.md                frontmatter / AI 校注 / 改动报告 模板
+  character-sync.md           逐字映射与文字层
+  vl.md                       PaddleOCR-VL 第三读者：安装、显卡、实测、竖排古籍流程
+  structure-audit.md          底稿的结构核查：顺序与理由、结果格式、实测的坑
+  structure-prompts.md        结构核查各步的子代理提示词模板（派子代理时才读）
+  ai-judging.md、judging-prompt.md   AI 看原图判定疑字（经插件与不经插件两条路）
 tests/
   test_mineru_api.py          无外部调用的 API 上传/轮询/下载端到端测试
 ```
 
 ## 状态
 
-在一篇期刊论文和一本 200 页专著上做过端到端验证（含无 skill 对照组）。**尚未覆盖**：表格密集型 PDF、双栏排版、竖排古籍、扫描件 OCR、英文文献、含公式的理工科文献。
+在一篇期刊论文和一本 200 页专著上做过端到端验证（含无 skill 对照组）。竖排标点古籍（扫描件、强制 OCR）《黄道周集》497 页整本走通：VL 底稿 → 逐字映射 → AI 看原图判定疑字 → 结构核查（注、篇题、清单页、残留）→ 竖排文字层。**尚未覆盖**：表格密集型 PDF、双栏排版、英文文献、含公式的理工科文献。

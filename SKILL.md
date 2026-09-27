@@ -1,6 +1,6 @@
 ---
 name: md1012
-description: 历史研究用的高质量 Markdown 工具链（原名 mineru）：用 MinerU 精准解析 API 取得 PDF 解析产物，整理成可信的 Obsidian Markdown（补回 full.md 丢失的脚注、页码与元数据，还原被吞的标点，正文合并成一份、卷首书末另存，一本书的全部文件放进它自己的文件夹，出改动报告）；按需给正文建逐字对应 PDF 的映射，配合笔记1012 插件做校勘记、OCR 疑字（含 AI 看原图判定、异体字规范化）与校订版 PDF 文字层。用户要解析或整理 PDF、处理 MinerU 输出（full.md、layout.json、middle.json、content_list.json）、把教材/论文/专著/古籍转成 Markdown、建或重建逐字映射、判定 OCR 疑字、生成校订版 PDF 时使用。
+description: 历史研究用的高质量 Markdown 工具链（原名 mineru）。把 PDF（教材、论文、专著、竖排繁体古籍扫描件）整理成可信、带脚注页码多级标题图表的 Obsidian Markdown：用 MinerU 精准解析 API 或 PaddleOCR-VL 取得底稿，补回丢失的脚注、页码、篇题与标点，逐页核对页下注与目录，出改动报告与校注；按需给正文建逐字对应 PDF 的映射，AI 看原图判定 OCR 疑字（按用户选的异体字方针），生成带隐形文字层的校订版 PDF（横排竖排都支持），配合笔记1012 插件。用户说「把这个 PDF 转成 Markdown」「用 md1012」「整理 MinerU 输出（full.md、layout.json、middle.json）」「古籍/竖排 OCR」「脚注丢了」「逐字映射」「OCR 疑字」「PDF 文字层」「校订版 PDF」时都应使用，即使没点名 MinerU。
 ---
 
 # md1012：历史研究用的 Markdown 工具链
@@ -9,11 +9,41 @@ description: 历史研究用的高质量 Markdown 工具链（原名 mineru）�
 
 ## 模式选择（每份新材料重新判断）
 
-默认走下方普通转换流程。“转 Markdown”“整理 MinerU 输出”“转成 Obsidian 笔记”及“重新 OCR”均不启动逐字映射，不安装 PaddleOCR，不产生逐字 sidecar。只有用户明确要求“逐字对应 PDF”“选中文字精确定位原文”等能力，才追加逐字模式；“联动”等模糊表述先确认。之前某本书采用逐字模式，不改变新材料的默认值。
+逐字模式是否可用，取决于用户首次使用时是否选择安装本地 OCR 环境（见「首次使用」）：
+
+- **已安装**：每份新材料开工时，把「普通转换 + 逐字映射与交叉核对（推荐）」和「只做普通转换」两项列给用户选，推荐前者；说明逐字映射要多花本地时间（按页数估算）。用户选了才跑，不替用户默认开跑。竖排标点排印本已整本走通（《黄道周集》497 页，见下文「竖排、古籍与 MinerU 整块漏读」）；其他未验证过的版式照样推荐，但注明「此类版式的逐字映射尚在验证」。
+- **未安装 / 用户谢绝过**：默认只走普通转换，不再每本书追问；用户明确要求“逐字对应 PDF”“选中文字精确定位原文”等能力时，再回到安装提问。
+- “联动”等模糊表述先确认。之前某本书采用逐字模式，不改变新材料的选择——每本书重新问。
+
+### 异体字方针（每本书开工必问，不设默认）
+
+每份新材料开工时，与上面的模式选择放在同一轮提问里，**固定**让用户选异体字方针；无论材料是简体、繁体、古籍，也无论是否走逐字模式，都要问，不得替用户默认，也不得沿用上一本书的选择。用户在本次对话里已就这本书明确答过的，不重复问。
+
+> 原书印的字形与 OCR 输出的字形不同时（如原书印「爲」「黄」，OCR 出「為」「黃」），正文用哪一种？
+>
+> 1. **保留原书字形**：正文照原书印的字形录入（OCR 出的异体改回原书字形）。代价：搜索时要用原书字形才搜得到。
+> 2. **统一为规范字形**：正文统一用规范字形（简体书按《通用规范汉字表》；繁体书的「规范」口径须先与用户说定是哪套字形，说不定就不用此项）。校注记「原书作某」。
+
+执行规则：
+
+- 选定的方针写进书文件夹的校注文件 frontmatter（`异体字方针: 保留原书字形` 或 `统一为规范字形`）；走 AI 看原图判定时，`window.__judgement.variants` 按此取 `keep` / `normalize`。
+- 异体字替换属于内容层改字：必须先核 PDF 原图，**全书成批的替换也要由脚本生成清单**、跑 `diff_report.py`，在交付报告里按「原字→改作」分组写明处数与依据。
+- OCR 模型分不清的近形异体（如「黃／黄」在本机 PaddleOCR 输出里时而此时而彼）不能拿 OCR 结果当原书字形的证据，只认原图。
+- 选「保留原书字形」又走逐字模式时，把逐组核实过的异体对写进映射配置的 `variantEquivalents`（本书字形表，见 character-sync.md），否则这些字全被当成疑字、拿不到坐标。
+
+### 竖排、古籍与 MinerU 整块漏读
+
+竖排书（或 MinerU 整块漏掉署名、页下注、目录页的书）在普通流程之外加一个**第三读者 PaddleOCR-VL**，读取 [references/vl.md](references/vl.md)：它补回 MinerU 漏掉的块（`vl_supplement.py` → 补充行框交逐字映射）、给出疑字线索（`vl_compare.py`）。要用它须用户同意下载 llama.cpp 与约 1.7 GB 模型；A 卡走 llama.cpp 的 Vulkan。
+
+**MinerU 在某本书上明显不行时，底稿可改用 VL**（`vl_build.py`，由用户拍板；《黄道周集》实测 MinerU 汉字 88%、VL 99.6%）：它推断印刷页码、按页下注分隔线认注、拦下 VL 凭空编造的文字、用本书字形表改回原书字形。无论哪家作底稿，改字都照常走决策点与校注。
+
+**VL 底稿之后一定要做结构核查**（[references/structure-audit.md](references/structure-audit.md)）。VL 字认得准，但结构会丢：整条注漏收或混进正文、篇题整行读丢、目录和篇目清单读乱、书眉夹进句子。逐字映射只比字，这些它查不出来。《黄道周集》在映射和疑字判定都做完后，仍查出 61 条漏注、17 个漏读的篇题。核查按页出任务、交子代理看图、由 `structure_audit.py` 核对后执行，顺序和理由都在那份文件里。
+
+竖排书的文字层与插件版本的关系见 vl.md 末尾。
 
 - 普通转换：PDF 预检 → 确定 OCR 路线 → 获取或复用 MinerU 产物 → 审计与重建 → 核对标题、页码、脚注 → 正文合并成一份、卷首书末另存 → 校验与 diff → 交付到书文件夹（布局见「交付物」）。
 - 逐字模式：普通转换完成并确定最终 Markdown（已有成品直接复用）→ 读取 [references/character-sync.md](references/character-sync.md) → 使用随 skill 提供的映射入口。默认只交付文件，不安装/更新插件或打开 Obsidian（下面的疑字判定是例外：它要在用户**已经开着**的 Obsidian 里执行，仍不要替用户启动 Obsidian）。
-- AI 看原图判定 OCR 疑字（用户要求时）：读取 [references/ai-judging.md](references/ai-judging.md)，整本六步流程（截图 → 子代理并行判定 → 合并过目 → 执行 → 把握低的交站长判 → 整批放行）、执行规则、异体字选项（规范字 / 保留原书字形）、花费参考与各书实例。
+- AI 看原图判定 OCR 疑字（用户要求时）：读取 [references/ai-judging.md](references/ai-judging.md)，整本六步流程（截图 → 子代理并行判定 → 合并过目 → 执行 → 把握低的交站长判 → 整批放行）、执行规则、异体字选项（取开工时用户选定的方针，见「异体字方针」）、花费参考与各书实例。书不在 Obsidian 库里时用 `doubt_sheets.py` + `apply_doubts.py`，不经插件。
 
 ### PDF 本地预检
 
@@ -44,6 +74,19 @@ description: 历史研究用的高质量 Markdown 工具链（原名 mineru）�
 > 1. **推荐：使用 MinerU API**。我会引导你在本机安全配置一次 API Token，随后自动提交、等待、下载和解压。
 > 2. 使用 MinerU 桌面软件手动解析。请完成解析并将完整解压输出目录交给我，我再负责重建 Markdown、脚注和校验。
 
+同一次首次使用里，接着问第二个问题（已装好本地 OCR 环境、或 `%APPDATA%\mineru-skill\config.json`（其他平台为 `~/.config/mineru-skill/config.json`）里已记录 `char_sync_preference` 时跳过）：
+
+> 要不要安装本地 OCR 环境（PaddleOCR，推荐）？
+>
+> 装了以后，每本书可以多做一步「逐字映射与交叉核对」：本机再用 PaddleOCR 读一遍原图，与 MinerU 的结果逐字比对，两家读法不同的字标为疑字，交 AI 看原图判定；正文每个字还能对应到 PDF 上的位置，配合笔记1012 插件做校勘记与校订版 PDF。
+>
+> 代价：首次要建一个独立的 Python 3.11 环境并下载约数百 MB 模型；每本书在本机多跑一段时间。教材不会上传给 PaddleOCR。
+>
+> 1. **推荐：安装**
+> 2. 暂不安装（以后要用时再装）
+
+用户选安装：按 [references/character-sync.md](references/character-sync.md) 建隔离环境、装 `scripts/sync-requirements.txt`，用一两页样本跑通后再说装好。无论选哪项，把结果写进上述 config.json 的 `char_sync_preference`（`"installed"` / `"declined"`），只增这一个键，不动其他内容；此后不再重复提问。
+
 用户在同一对话中已经选过路线，或已明确要求 API / 桌面软件时，不重复询问。用户选择 API 后走下方“精准解析 API”流程；选择桌面软件后，等待其提供已经解压的完整 MinerU 输出目录。用户一开始给的就是该输出目录时，直接从“探查与审计”开始。
 
 仅仅提到、阅读或询问 PDF 不构成上传授权。只有用户明确要求用 MinerU 处理该文件时，才可把文件发送到外部 MinerU 服务。
@@ -60,7 +103,7 @@ Token 不准让用户贴进聊天、命令参数、仓库或 Markdown。让用�
 python <skill>/scripts/mineru_api.py configure
 ```
 
-脚本用隐藏输入读取 Token；Windows 通过 DPAPI 加密，其他平台写入权限受限的用户配置文件。也可从当前进程的 `MINERU_API_TOKEN` 读取。默认额度定义为每日 5000 个解析文件、1000 个高优先级解析页；若用户后台的“基础额度 + 额外申请额度”不同，用配置参数覆盖。
+脚本用隐藏输入读取 Token（Windows 用 DPAPI 加密），也可从 `MINERU_API_TOKEN` 读取。
 
 ### 此后提交 PDF
 
@@ -68,19 +111,11 @@ python <skill>/scripts/mineru_api.py configure
 python <skill>/scripts/mineru_api.py submit a.pdf [b.pdf ...] -o <书文件夹>/_数据/MinerU原始
 ```
 
-解析产物放进这本书自己的 `_数据/MinerU原始/`（一本书的所有东西都在它的文件夹里，见「交付物」）；一次提交多本时各书分开提交。
+- 先完成本地预检与 OCR 路线选择，已确定路线时显式传 `--ocr on/off`（客户端的 `auto` 只看文字量，不能替代质量核查）。
+- 解析产物放进这本书自己的 `_数据/MinerU原始/`；一次提交多本时各书分开提交。超 200 页、200 MB 的 PDF 客户端会无损拆卷并缓存，原 PDF 不动；中断后 `resume <batch_id>`。缺 `pypdf` 时由执行者装一次，不让用户每次手工装。
+- 完成后读 `_mineru_api_report_*.json`，告诉用户成功与失败的文件、页数、分卷数、输出目录和估算剩余额度。**「剩余」要说明是本机估算**：官方没有用量查询端点，看不到其他设备和官网的消耗。
 
-客户端必须完成这些事：
-
-1. 先完成上述本地预检与 OCR 路线选择。客户端 `auto` 只用文字量作简易判断，不能替代质量核查；已确定路线时显式传 `--ocr on/off`。扫描件自动开启 OCR。
-2. 原 PDF 永不改动。超过 200 页或 200 MB 时，以页面对象复制方式无损拆成合规分卷；分卷按源文件路径、大小和修改时间指纹缓存在输出目录的 `_upload_cache/`，再次提交同一文件直接复用。单批最多 50 个本地文件。
-3. 调用 `/api/v4/file-urls/batch`，把文件 PUT 到预签名地址，轮询 `/api/v4/extract-results/batch/{batch_id}`。
-4. 下载并安全解压 `full_zip_url`；输出重名时另起名字，不覆盖旧结果。
-5. 把实际上传分卷作为 `*_origin.pdf` 放进对应解压目录，写 `_mineru_api_report_*.json`；stdout 只报告 ASCII 状态。中断后用 `resume <batch_id>` 继续。
-
-若运行环境缺少 `pypdf`，由执行者一次性安装 `python -m pip install pypdf`；不要把依赖安装变成用户每次提交 PDF 时的手工步骤。
-
-完成后必须读报告并告诉用户：成功/失败文件、输入页数、实际上传分卷数、输出目录、当日本机已追踪文件数与页数、估算剩余额度。**“剩余”必须称为本机估算**：官方文档没有用量查询端点，无法知道其他设备或官网操作产生的消耗。超过 1000 个高优先级页后任务仍可提交，只会进入普通队列；两项额度每日 0 点（UTC+8）重置。
+端点、额度定义、客户端默认参数、报告字段见 `references/mineru-api.md`。
 
 取得 ZIP 并解压后，不要交付 `full.md`；继续执行下面的重建流程。
 
@@ -168,7 +203,7 @@ python <skill>/scripts/diff_report.py d1,d2,d3 "书/[01]*.md"   # 多段源 -> �
 python -X utf8 <skill>/scripts/copy_images.py <MinerU输出目录> <成品目录> --report <报告.json>
 ```
 
-图片不要整目录拷：`copy_images.py` 只复制成品 Markdown 真正引用到的图片，MinerU 多吐出来的页眉、装饰图、重复裁图留在原目录，报告里列为 orphans；已有同名不同内容的文件不覆盖（退出码 3；2 留给命令行用法错误）。引用的写法认全：`![alt](images/x.png "标题")`、`![](<images/含 空格.png>)`、`%20` 之类的 URL 转义、`![[x.png|300]]`、带引号或不带引号的 `<img src=...>`、以及 `[ref]: images/x.png` 这种引用式定义；扩展名覆盖 png/jpg/jpeg/gif/webp/bmp/jp2/svg/tif/tiff/avif。源目录下**所有** `images/` 目录会被一并收集合并（拆卷解析会有好几个），因此多段源只需对每个**成品目录**跑一次，不必按 part 跑；不同 part 出现同名但内容不同的图片时不猜，报告到 `sourceDuplicates` 并计入退出码 3。
+图片不要整目录拷：`copy_images.py` 只复制成品真正引用到的图片，MinerU 多吐出来的页眉、装饰图留在原目录，报告里列为 orphans。拆卷解析的多段源只需对每个成品目录跑一次。同名不同内容的图片不覆盖、不猜，以退出码 3 报出。能认的引用写法与退出码细则见 `references/mineru-outputs.md`「图片拷贝」。
 
 `verify.py`、`diff_report.py` 的报告写进成品所在书文件夹的 `_数据/过程报告/`。
 
@@ -206,6 +241,7 @@ python -X utf8 <skill>/scripts/copy_images.py <MinerU输出目录> <成品目录
     MinerU原始/                MinerU 解析产物（mineru_api.py -o 指到这里）
     过程报告/                  _skeleton.md、_split_report.txt、_verify.txt、_diff_report.txt 等
     book.json、config.json、映射/、校勘账本.json    逐字模式才有（见 references/character-sync.md）
+    疑字判定/、注区审核/、补注/、补篇题/、残留清理/  判定与结构核查的工作目录（截图、子代理结果、执行报告、改前备份）
 ```
 
 **不要再叠一份按章拆开的副本**——同一段文字存两份会在检索时同时命中、挤占名额，两份还会漂移。

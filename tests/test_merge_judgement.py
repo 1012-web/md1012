@@ -56,3 +56,11 @@ def test_no_batch_files_is_a_clear_error(tmp_path: Path) -> None:
     result = run(tmp_path)
     assert result.returncode != 0
     assert "没有 judgement-bN.json" in result.stderr
+
+
+def test_empty_correct_means_delete_and_is_accepted(tmp_path: Path) -> None:
+    # 判 C、correct 为空串：原书该处没有字（如混进正文的书口页码），合法；不写 correct 才算缺
+    setup(tmp_path, {1: [item(1, "C", correct=""), item(2, "C")]}, 2)
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "#2 判 C 却没写 correct" in result.stdout and "#1" not in result.stdout

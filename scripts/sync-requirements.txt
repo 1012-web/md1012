@@ -7,3 +7,7 @@ Pillow>=11,<12
 # 其他平台退回纯 CPU 的 onnxruntime。识别结果与 PaddleOCR 逐字相同，快的是速度。
 onnxruntime-directml==1.24.4 ; sys_platform == "win32"
 onnxruntime>=1.20,<2 ; sys_platform != "win32"
+# 只有 vl_parse.py（PaddleOCR-VL 第三读者：竖排、古籍、MinerU 整块漏读时用）才用到：版面分析与识别流程的
+# 附加依赖，以及连本机 llama.cpp 服务的客户端。识别模型本身跑在 llama-server 里，见 references/vl.md。
+paddlex[ocr]==3.7.2
+openai>=1.63

@@ -34,7 +34,8 @@ def problems_of(items: list[dict], manifest: dict[int, dict]) -> list[str]:
             problems.append(f"#{n} verdict 应为 A/B/C/D，实为 {item['verdict']!r}")
         if item["confidence"] not in ("高", "低"):
             problems.append(f"#{n} confidence 应为 高/低，实为 {item['confidence']!r}")
-        if item["verdict"] == "C" and not item.get("correct"):
+        # correct 为空串是合法的：原书该处没有字，OCR 多读出来的（如混进正文的书口页码），判 C 删去
+        if item["verdict"] == "C" and item.get("correct") is None:
             problems.append(f"#{n} 判 C 却没写 correct")
     return problems
 

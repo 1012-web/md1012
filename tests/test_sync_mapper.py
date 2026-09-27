@@ -140,6 +140,74 @@ def test_align_page_leaves_ocr_misses_unmapped() -> None:
     assert markdown[1].candidate_rect == (0.3, 0.2, 0.5, 0.4)
 
 
+def test_variant_equivalents_give_the_printed_form_the_ocr_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MODULE, "VARIANT_EQUIVALENTS", MODULE.parse_variant_equivalents(["黄黃", "説說"]))
+    markdown = [MODULE.VisibleChar(value, index, index + 1, 1, 17) for index, value in enumerate("黄道説")]
+    ocr = [
+        MODULE.OCRChar("黃", (0.5, 0.10, 0.55, 0.13)),
+        MODULE.OCRChar("道", (0.5, 0.13, 0.55, 0.16)),
+        MODULE.OCRChar("說", (0.5, 0.16, 0.55, 0.19)),
+    ]
+
+    assert MODULE.align_page(markdown, ocr, "vertical-rl") == 3
+    assert [char.value for char in markdown] == list("黄道説")  # 写出的仍是原书字形
+    assert all(char.candidate_value is None for char in markdown)
+
+
+def test_variant_equivalents_are_off_by_default() -> None:
+    markdown = [MODULE.VisibleChar("黄", 0, 1, 1, 17)]
+    assert MODULE.align_page(markdown, [MODULE.OCRChar("黃", (0.5, 0.1, 0.55, 0.13))]) == 0
+    assert markdown[0].candidate_value == "黃"
+
+
+def test_parse_variant_equivalents_rejects_a_character_in_two_groups() -> None:
+    assert MODULE.parse_variant_equivalents(["爲為"]) == {"為": "爲"}
+    with pytest.raises(SystemExit):
+        MODULE.parse_variant_equivalents(["黄黃", "黃黄"])
+    with pytest.raises(SystemExit):
+        MODULE.parse_variant_equivalents(["黄"])
+
+
+def estimate_block(values: str, rects: dict[int, tuple[float, float, float, float]]) -> "MODULE.MarkdownBlock":
+    chars = [MODULE.VisibleChar(value, index, index + 1, 1, 17, rect=rects.get(index)) for index, value in enumerate(values)]
+    return MODULE.MarkdownBlock(file="a.md", source_from=0, source_to=len(values), kind="paragraph", chars=chars)
+
+
+def test_estimate_missing_puts_vertical_punctuation_between_its_neighbours() -> None:
+    block = estimate_block("甲，乙", {0: (0.5, 0.10, 0.55, 0.13), 2: (0.5, 0.145, 0.55, 0.175)})
+
+    assert MODULE.estimate_missing([block], "vertical-rl") == 1
+    comma = block.chars[1]
+    assert comma.rect is None  # 推定框不冒充读出来的字位
+    assert comma.estimated_page == 17
+    x0, y0, x1, y1 = comma.estimated_rect
+    assert (x0, x1) == (0.5, 0.55) and 0.13 <= y0 < y1 <= 0.145
+
+
+def test_estimate_missing_follows_the_previous_character_at_a_column_end() -> None:
+    # 句号在列尾，下一个字已在左边一列的列首：标点跟在前一字下方，不跑到下一列去
+    block = estimate_block("甲。乙", {0: (0.5, 0.80, 0.55, 0.83), 2: (0.44, 0.10, 0.49, 0.13)})
+
+    assert MODULE.estimate_missing([block], "vertical-rl") == 1
+    x0, y0, x1, y1 = block.chars[1].estimated_rect
+    assert (x0, x1) == (0.5, 0.55) and y0 == pytest.approx(0.83)
+
+
+def test_estimate_missing_works_along_a_horizontal_line() -> None:
+    block = estimate_block("甲、乙", {0: (0.10, 0.2, 0.13, 0.23), 2: (0.145, 0.2, 0.175, 0.23)})
+
+    assert MODULE.estimate_missing([block]) == 1
+    x0, y0, x1, y1 = block.chars[1].estimated_rect
+    assert (y0, y1) == (0.2, 0.23) and 0.13 <= x0 < x1 <= 0.145
+
+
+def test_estimate_missing_leaves_unread_hanzi_alone() -> None:
+    block = estimate_block("甲丙乙", {0: (0.5, 0.10, 0.55, 0.13), 2: (0.5, 0.16, 0.55, 0.19)})
+
+    assert MODULE.estimate_missing([block], "vertical-rl") == 0
+    assert block.chars[1].estimated_rect is None
+
+
 def test_load_model_parts_keeps_blocks_and_visual_lines(tmp_path: Path) -> None:
     path = tmp_path / "sample_model.json"
     payload = [[
@@ -537,6 +605,27 @@ def test_line_supplementer_adds_footnote_lines_after_the_body_and_caches_them(tm
     cached = MODULE.LineSupplementer(tmp_path, factory=lambda: StubDetector([]))
     assert cached.lines_for(24, [footnote], body_lines, lambda: image) == extra
     assert cached.detector is None
+
+
+def test_line_supplementer_keeps_side_by_side_vertical_columns_apart(tmp_path: Path) -> None:
+    # 竖排页下注两列：上下完全重叠，按「同一横行合并」会并成一框；转置后按列处理才分得开
+    import numpy as np
+
+    image = np.full((600, 400, 3), 255, dtype=np.uint8)
+    footnote = MODULE.LayoutBlock(17, (0.1, 0.5, 0.3, 0.9), "〔一〕本文原載", "page_footnote")
+    # 检测模型看的是正着的裁块（原页 x 8..152、y 268..572），多边形用裁块像素坐标
+    detector = StubDetector([[
+        [(40, 44), (64, 44), (64, 260), (40, 260)],
+        [(80, 44), (104, 44), (104, 260), (80, 260)],
+    ]])
+    supplementer = MODULE.LineSupplementer(tmp_path, "vertical-rl", factory=lambda: detector)
+
+    extra = supplementer.lines_for(17, [footnote], [], lambda: image)
+
+    assert detector.crops == [(304, 144)]  # 裁块是正着的：高沿原页 y、宽沿原页 x
+    assert extra == [(0.22, 0.52, 0.28, 0.88), (0.12, 0.52, 0.18, 0.88)]  # 两列分开、从右到左
+    cached = MODULE.LineSupplementer(tmp_path, "vertical-rl", factory=lambda: StubDetector([]))
+    assert cached.lines_for(17, [footnote], [], lambda: image) == extra
 
 
 def test_line_supplementer_skips_pages_whose_blocks_all_have_lines(tmp_path: Path) -> None:

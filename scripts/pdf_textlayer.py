@@ -151,6 +151,62 @@ def write_text_layer(page: Any, chars: list[list[Any]], fonts: FontSet) -> int:
     return written
 
 
+def split_columns(chars: list[list[Any]]) -> list[list[list[Any]]]:
+    """竖排清单按阅读顺序切成列：纵向回到上方（换到下一列开头）或横向中心差出约一列宽，才算新列。"""
+    columns: list[list[list[Any]]] = []
+    for item in chars:
+        if columns:
+            last = columns[-1][-1]
+            width = max(last[3] - last[1], item[3] - item[1])
+            same = item[2] >= last[2] - 0.01 and abs((last[1] + last[3]) / 2 - (item[1] + item[3]) / 2) < 0.8 * width
+            if same:
+                columns[-1].append(item)
+                continue
+        columns.append([item])
+    return columns
+
+
+def write_text_layer_vertical(page: Any, chars: list[list[Any]], fonts: FontSet) -> int:
+    """竖排：每一列写成一条旋转 90° 的隐形文字行，列内每个字仍落在自己的框里。
+
+    逐字各写一行（横排的写法）在竖排书上，PDF.js 会把每个字当成一行，复制出来一字一行。
+    整列一行才像普通竖排 PDF：复制一列一行、搜索跨列也连得上。三条要点（4 页试水实测得来）：
+    整列用同一条基线（字号不同基线就错开，阅读器会断行）；每个字的前进宽度正好填满字框高度；
+    与上一字之间不到四个字距的缝接上（否则 PDF.js 在字间插空格、甚至断行，搜「治生治産」搜不到）。
+    """
+    import pymupdf
+
+    if not chars:
+        return 0
+    width, height = page.rect.width, page.rect.height
+    main = fonts.fonts[0]
+    extent = max(0.5, main.ascender - main.descender)
+    rotate = pymupdf.Matrix(-90)  # 未旋转坐标 (u, v) -> 页面 (-v, u)：u 沿列向下，字顶朝右
+    written = 0
+    for column in split_columns([item for item in chars if item[0] and item[0].strip()]):
+        x0 = sorted(item[1] for item in column)[len(column) // 2] * width
+        x1 = sorted(item[3] for item in column)[len(column) // 2] * width
+        base_x = x0 + (-main.descender) * (max(1.0, x1 - x0) / extent)  # 字顶朝右，基线在列框左侧
+        pitch = sorted((item[4] - item[2]) * height for item in column)[len(column) // 2]
+        writer = pymupdf.TextWriter(page.rect)
+        cursor = None
+        for value, _, cy0, _, cy1 in column:
+            font = fonts.pick(value)
+            top, bottom = cy0 * height, cy1 * height
+            # 列内不到四个字距的缝都接上：纸面上的注号〔一〕不在正文字里、句号后常留一格，合起来能空出
+            # 两三格；竖排的段落在列尾结束、下一段另起一列，所以列中的空缺都在一段话之内。
+            # 更大的空白（题目与署名之间）照留，阅读器按空格或断行处理。
+            if cursor is not None and 0 <= top - cursor < 4 * pitch:
+                top = cursor
+            per_point = max(1e-3, font.text_length(value, fontsize=1))
+            size = max(0.5, (bottom - top) / per_point)
+            writer.append((top, -base_x), value, font=font, fontsize=size)
+            cursor = top + size * per_point
+            written += len(value)
+        writer.write_text(page, render_mode=3, morph=(pymupdf.Point(0, 0), rotate))
+    return written
+
+
 def comparable(text: str) -> str:
     return "".join(char for char in text if not char.isspace())
 
@@ -163,9 +219,15 @@ def match_ratio(expected: str, actual: str) -> float:
     return difflib.SequenceMatcher(None, expected, actual, autojunk=False).ratio()
 
 
-def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) -> dict[str, Any]:
+def build(
+    pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True, writing_mode: str | None = None
+) -> dict[str, Any]:
     import pymupdf
 
+    writing_mode = writing_mode or spec.get("writingMode", "horizontal-tb")
+    if writing_mode not in {"horizontal-tb", "vertical-rl"}:
+        raise ValueError("writingMode must be horizontal-tb or vertical-rl")
+    write = write_text_layer_vertical if writing_mode == "vertical-rl" else write_text_layer
     started = time.monotonic()
     source_hash = sha256(pdf)
     original = pymupdf.open(pdf)
@@ -193,7 +255,7 @@ def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) ->
             result.notes.append(f"removing text changed {ratio:.4%} of pixels; original page kept")
         else:
             result.removed_old = removed
-            result.written = write_text_layer(page, chars, fonts)
+            result.written = write(page, chars, fonts)
             if chars:
                 expected = comparable("".join(item[0] for item in chars))
                 result.extracted_match = round(match_ratio(expected, comparable(page.get_text("text"))), 4)
@@ -217,6 +279,7 @@ def build(pdf: Path, spec: dict[str, Any], output: Path, verify: bool = True) ->
         "sourceSha256": source_hash,
         "sourceBytes": pdf.stat().st_size,
         "output": str(output),
+        "writingMode": writing_mode,
         "outputSha256": sha256(output),
         "outputBytes": output.stat().st_size,
         "pages": len(results),
@@ -285,6 +348,8 @@ def main() -> None:
     b.add_argument("--output", type=Path, required=True)
     b.add_argument("--report", type=Path)
     b.add_argument("--no-verify", action="store_true", help="skip the before/after appearance check when removing old text")
+    b.add_argument("--writing-mode", choices=("horizontal-tb", "vertical-rl"),
+                   help="default: the spec's writingMode, else horizontal-tb; vertical-rl writes one rotated line per column")
     f = sub.add_parser("find-copies")
     f.add_argument("--pdf", type=Path, required=True)
     f.add_argument("--search-root", type=Path, required=True)
@@ -297,7 +362,8 @@ def main() -> None:
     r.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.action == "build":
-        report = build(args.pdf, load_spec(args.spec), args.output, verify=not args.no_verify)
+        report = build(args.pdf, load_spec(args.spec), args.output, verify=not args.no_verify,
+                       writing_mode=args.writing_mode)
         target = args.report or args.output.with_suffix(".textlayer-report.json")
         write_report(target, report)
         print("TEXTLAYER_REPORT " + str(target).encode("ascii", "backslashreplace").decode("ascii"))
