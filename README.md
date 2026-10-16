@@ -43,7 +43,7 @@ python scripts/crop_pdf.py <origin.pdf> --page 2 --rect 65,545,300,559 -o crop.p
 
 脚本把报告写成 UTF-8 文件、stdout 只打印 ASCII 状态行——Windows 控制台是 GBK，中文直接 print 会乱码。
 
-MinerU 精准 API 单文件限制为 200 MB、200 页。`mineru_api.py` 会保留原 PDF，以页面对象复制方式无损拆分超限文件，并在输出目录的 `_upload_cache/` 按来源指纹复用分卷；完成后报告当日本机追踪的解析文件数、页数和估算剩余额度。官方未提供用量查询端点，因此剩余量明确标为本机估算。PaddleOCR 官方 API 每日有页数上限；`paddle_api.py` 按 100 页一块分批提交，中断后重跑即续。
+免费额度（2026-10-16 核对）：MinerU 每日 1000 页最高优先级，超出的排普通队列、不拒绝；PaddleOCR 每个模型每日 20000 页。MinerU 精准 API 单文件限制为 200 MB、200 页。`mineru_api.py` 会保留原 PDF，以页面对象复制方式无损拆分超限文件，并在输出目录的 `_upload_cache/` 按来源指纹复用分卷；完成后报告当日本机追踪的解析文件数、页数和估算剩余额度。官方未提供用量查询端点，因此剩余量明确标为本机估算。`paddle_api.py` 按 100 页一块分批提交，中断后重跑即续。
 
 ## 对到 PDF 的位置：逐行映射
 
