@@ -1,0 +1,4 @@
+# 各平台一律检出为 LF：sync-source.json 记的是 sync_mapper.py 的指纹，换行不同指纹就对不上
+* text=auto eol=lf
+*.png binary
+*.jpg binary

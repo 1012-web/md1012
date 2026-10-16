@@ -1,6 +1,6 @@
 // 在 Obsidian 里执行（经 Obsidian 命令行 eval 读入本文件）：按「AI 看原图判定」的结果改正文、写账本。
 // 用法（先设参数再读入本文件）：
-//   window.__judgement = { dir: "C:/Users/yan/.mineru-pdf-sync/doubt-trial", variants: "normalize" | "keep"（必填，按该书选定的异体字方针）, by: "AI 看原图判定" };
+//   window.__judgement = { dir: "<书文件夹>/_数据/疑字判定", variants: "normalize" | "keep"（必填，按该书选定的异体字方针）, by: "AI 看原图判定" };
 //   eval(require("fs").readFileSync("<本文件>", "utf8"))
 // dir 里要有 doubt_crops.py 写的 manifest.json 与判定结果 judgement.json（格式见 references/ai-judging.md）。
 // 结果写在 window.__judgementResult（JSON 字符串）。需要笔记1012 插件（note1012）的 PDF 模块。

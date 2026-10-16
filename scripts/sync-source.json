@@ -3,7 +3,7 @@
   "source": "scripts/sync_mapper.py (this skill is the sole maintainer since 2026-09-11; the vault-side generate_map.py is retired)",
   "sourceProject": "313 history vault",
   "snapshotDate": "2026-09-25",
-  "sha256": "aa1d3a805f7288ae979292ef300c54cbdd043589319d0f74edb0367f7a660834",
+  "sha256": "320741f7f5eccd7c25c78987c180afdb750ac69708e91109405fac1a56dea7a6",
   "changes": [
     "annotation and wikilink masking including multiline notes",
     "explicit Markdown input filenames",
