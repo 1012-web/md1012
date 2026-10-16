@@ -68,6 +68,9 @@ class MockPaddle(BaseHTTPRequestHandler):
         port = self.server.server_port
         if self.path.startswith("/api/v2/ocr/jobs/"):
             job = self.path.rsplit("/", 1)[1]
+            if self.jobs[job] in self.fail_sizes:
+                self.send_json({"code": 0, "data": {"state": "failed", "errorMsg": "OCR服务请求失败，状态码 500"}})
+                return
             self.send_json({"code": 0, "data": {"state": "done", "resultUrl": {"jsonUrl": f"http://127.0.0.1:{port}/result/{job}"},
                                                  "extractProgress": {"totalPages": self.jobs[job]}}})
         elif self.path.startswith("/result/"):
@@ -87,7 +90,8 @@ class PaddleApiTest(unittest.TestCase):
         self.env = {k: os.environ.get(k) for k in ("PADDLEOCR_API_BASE_URL", "MINERU_SKILL_CONFIG_DIR")}
         os.environ["PADDLEOCR_API_BASE_URL"] = f"http://127.0.0.1:{self.server.server_port}/api/v2/ocr"
         os.environ["MINERU_SKILL_CONFIG_DIR"] = str(self.root / "config")
-        MockPaddle.jobs, MockPaddle.models = {}, []
+        MockPaddle.jobs, MockPaddle.models, MockPaddle.fail_sizes = {}, [], set()
+        paddle_api.RETRY_WAIT = 0
 
     def tearDown(self):
         self.server.shutdown()
@@ -123,6 +127,22 @@ class PaddleApiTest(unittest.TestCase):
         self.assertEqual((out / "p0002.json").read_text(encoding="utf-8"), "{}")
         usage = json.loads(paddle_api.settings_path().read_text(encoding="utf-8"))["usage"]
         self.assertEqual(usage["pages"], 4)
+
+    def test_a_failing_chunk_is_retried_then_skipped_without_stopping_the_rest(self):
+        pdf = self.root / "book.pdf"
+        make_pdf(pdf, 5)
+        out = self.root / "VL"
+        MockPaddle.fail_sizes = {1}  # 只有 1 页的块（第 5 页）一直失败
+        old_chunk = paddle_api.CHUNK_PAGES
+        paddle_api.CHUNK_PAGES = 2
+        try:
+            summary = paddle_api.run_submit(pdf, out, "1-5", "PaddleOCR-VL-1.6", "test-token", interval=0)
+        finally:
+            paddle_api.CHUNK_PAGES = old_chunk
+        self.assertEqual(summary["failed"][0]["pages"], [5, 5])
+        self.assertEqual(summary["parsed"], 4)
+        self.assertTrue((out / "p0004.json").exists() and not (out / "p0005.json").exists())
+        self.assertIn("OCR服务请求失败", (out / "_errors.log").read_text(encoding="utf-8"))
 
     def test_check_models_probes_newer_versions_and_respects_interval(self):
         result = paddle_api.check_models("test-token", "PaddleOCR-VL-1.6")

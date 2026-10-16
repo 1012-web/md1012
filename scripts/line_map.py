@@ -492,6 +492,20 @@ def main() -> None:
     files_out, report = build(blocks, args.md)
     report.update({"source": source, "writingMode": args.writing_mode,
                    "blockLevelCount": len(report["blockLevel"]), "unmappedCount": len(report["unmapped"])})
+    # 三档（逐行／逐块／逐页）各多少：按成品里的映射段数和字数（UTF-16 长度，汉字一字一个）两种口径都给，
+    # 交付报告照这里写。其余计数的单位见 units
+    tiers = {kind: {"segments": 0, "chars": 0} for kind in ("line", "block", "page")}
+    for entry_list in (f["lines"] for f in files_out.values()):
+        for entry in entry_list:
+            tier = tiers.get(entry.get("kind"))
+            if tier is not None:
+                tier["segments"] += 1
+                tier["chars"] += max(0, entry["to"] - entry["from"])
+    report["tiers"] = tiers
+    report["units"] = {"blocks": "底稿的版面块数", "lineBlocks": "切成了行的块数", "lines": "映射到框的段数（逐行＋逐块）",
+                       "blockLevelCount": "整块一个框的块数", "pageOnly": "只能推出页码的段数（逐页档）",
+                       "noPage": "连页码也推不出的段数", "unmappedCount": "底稿里没对上成品的块数（多为删掉的书眉、编造块）",
+                       "tiers": "三档的段数与字数"}
     args.out.mkdir(parents=True, exist_ok=True)
     result = {"version": 1, "granularity": "line", "source": source, "writingMode": args.writing_mode,
               "pdf": args.pdf.name, "files": files_out}

@@ -8,7 +8,7 @@
 
 产出:
     -o 指定的 markdown 骨架
-    <目录>/_build_report.txt  疑似引文块清单等需要复核的项
+    <书>/_数据/过程报告/_build_report.txt  疑似引文块清单等需要复核的项（-o 不在书文件夹里时写在 -o 旁边）
 """
 import argparse
 import os
@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (ANCHOR_RE, CIRC, CIRC_RE, FLOAT_PREFIX, block_text, body_blocks, die, find_files,
                      footnote_blocks, image_paths, is_break, join_lines, line_texts,
-                     load_blocklist, load_layout, page_number_map, strip_tags,
+                     load_blocklist, load_layout, page_number_map, process_report, strip_tags,
                      sub_blocks_by_type, write_report)
 
 META_PREFIX = ('收稿日期', '作者简介', '基金项目', '通信作者', '引用格式', '作者单位', 'DOI')
@@ -245,6 +245,11 @@ def main():
             html = (b.get('html') or b.get('table_body') or '').strip()
             for sub in sub_blocks_by_type(b, ('table_body', 'image_body')):
                 html = html or (sub.get('html') or sub.get('table_body') or '').strip()
+                # vlm 后端的 layout.json 把表格的行列结构放在 table_body 的 span.html 里：
+                # 只嵌截图会丢掉行列结构（不合「表格保留行列结构」），两样都要
+                for ln in sub.get('lines', []) or []:
+                    for sp in ln.get('spans', []) or []:
+                        html = html or (sp.get('html') or '').strip()
             out = ['*%s*' % sub_markers(c, pi) for c in caps if c]
             if html:
                 out.append(html)
@@ -388,7 +393,13 @@ def main():
     R.append('  2. 补全 frontmatter\n')
     R.append('  3. 还原正文标点（脚注不补）\n')
     R.append('  4. verify.py 校验 -> diff_report.py 出改动报告\n')
-    write_report(os.path.join(a.dir, '_build_report.txt'), ''.join(R))
+    # 报告跟着骨架走：骨架在 <书>/_数据/过程报告/ 时报告也在那里，不写进 MinerU 原始目录
+    rep_dir = os.path.dirname(os.path.abspath(a.out))
+    name = '_build_report.txt'
+    vol = re.search(r'pages-\d+-\d+', os.path.basename(os.path.normpath(a.dir)))
+    if vol:
+        name = '_build_report_%s.txt' % vol.group(0)
+    write_report(process_report(rep_dir, name) if '_数据' in rep_dir.split(os.sep) else os.path.join(rep_dir, name), ''.join(R))
     print('blocks=%d footnote_refs=%d footnote_defs=%d quote_candidates=%d joined=%d'
           % (len(lines), state['used'], len(notes), len(quote_candidates), len(joined)))
 

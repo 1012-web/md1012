@@ -3,6 +3,12 @@
 用法:
     python diff_report.py <mineru输出目录> <成品.md>
     python diff_report.py d1,d2,d3 "书/*.md"          # 一本书被切成几段解析、成品又分了章
+    python diff_report.py --before "<书>/_数据/过程报告/vl稿/*.md" "书/0*.md"
+                                                       # 竖排书（VL 底稿）：拿 vl_build.py 整理出的原稿比成品
+
+竖排书没有 MinerU 底稿。VL → 原稿这一步的机械改动（拦下的编造块、删掉的页眉书口、字形表替换）
+由 vl_build.py 记进 _vl_build_report.json；原稿 → 成品之间的一切改动由本脚本 --before 报出。
+两份报告合起来，就是成品相对 VL 读出的文字改了什么。
 
 剔除标点、空格、Markdown 语法后仍存在的差异 = 实质改动。
 补标点不会出现在结果里；动了字一定会。
@@ -21,9 +27,9 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (CIRC, CIRC_RE, block_text, body_blocks, die, footnote_blocks,
-                     join_lines, line_texts, load_layout, process_report, significant, strip_tags,
-                     write_report)
+from _common import (CIRC, CIRC_RE, ascii_path, block_text, body_blocks, die, footnote_blocks,
+                     join_lines, line_texts, load_layout, process_report, significant, split_notes,
+                     strip_tags, write_report)
 
 META_PREFIX = ('收稿日期', '作者简介', '基金项目', '通信作者', '引用格式', '作者单位', 'DOI')
 CIRC_SET = set(CIRC)
@@ -32,14 +38,15 @@ CIRC_SET = set(CIRC)
 def md_sections(text):
     """把成品拆成 (正文, 注释)，并去掉不属于原文的部分。"""
     text = re.sub(r'^---\n.*?\n---\n', '', text, flags=re.S)            # frontmatter
-    parts = re.split(r'\n#+\s*注释\s*\n', text, maxsplit=1)
-    body, notes = parts[0], (parts[1] if len(parts) > 1 else '')
+    # 注释区可能每章一个：只按第一个「## 注释」切，会把第一章以后的正文全当成注释来比
+    body, notes = split_notes(text)
     # AI 校注 callout 是我们加的，不参与比对
     body = re.sub(r'>\s*\[!\w+\][^\n]*AI\s*校注[^\n]*\n(?:>[^\n]*\n?)*', '', body)
     notes = re.sub(r'>\s*\[!\w+\][^\n]*AI\s*校注[^\n]*\n(?:>[^\n]*\n?)*', '', notes)
 
     def clean(s):
         s = re.sub(r'<!--.*?-->', '', s, flags=re.S)                     # 页码锚点等注释
+        s = re.sub(r'</?[A-Za-z][^<>]*>', '', s)                         # <small>、<sup class="item"> 等标签，字留下
         s = re.sub(r'\[\^\d+\]:?', '', s)                                # 脚注引用/定义标签
         s = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', s)                       # 图片
         s = re.sub(r'>\s*\[!\w+\]\s*', '', s)                            # callout 标记（保留标题文字）
@@ -97,27 +104,46 @@ def compare(name, src, out, R, maxlen=160):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('dir', help='MinerU 输出目录；多个用逗号分隔，顺序须与原书一致')
-    ap.add_argument('md', help='成品 md；多个用逗号分隔，或用通配符（按文件名排序）')
+    ap.add_argument('paths', nargs='+', help='<MinerU输出目录> <成品.md>；用 --before 时只给 <成品.md>')
+    ap.add_argument('--before', default=None,
+                    help='拿这几份 md（逗号分隔或通配符，按原书顺序）当源，代替 MinerU 目录：竖排书用 vl_build.py 原稿')
     ap.add_argument('--max-diff-chars', type=int, default=160, help='单条差异的打印上限')
     a = ap.parse_args()
+    if a.before:
+        if len(a.paths) != 1:
+            die('用 --before 时只给成品 md 一个参数')
+        a.dir, a.md = None, a.paths[0]
+    else:
+        if len(a.paths) != 2:
+            die('要给两个参数：<MinerU输出目录> <成品.md>（竖排书用 --before <原稿.md> <成品.md>）')
+        a.dir, a.md = a.paths
 
-    dirs = [x for x in a.dir.split(',') if x.strip()]
-    mds = []
-    for pat in a.md.split(','):
-        hit = sorted(glob.glob(pat)) if any(c in pat for c in '*?[') else [pat]
-        if not hit:
-            die('没有匹配到成品文件: ' + pat)
-        mds += hit
-    for d in dirs:
-        if not os.path.isdir(d):
-            die('目录不存在: ' + d)
+    def expand(spec, what):
+        files = []
+        for pat in spec.split(','):
+            hit = sorted(glob.glob(pat)) if any(c in pat for c in '*?[') else [pat]
+            if not hit or not all(os.path.isfile(h) for h in hit):
+                die('没有匹配到%s: %s' % (what, ascii_path(pat)))
+            files += hit
+        return files
 
+    mds = expand(a.md, '成品文件')
     src_body, src_notes = '', ''
-    for d in dirs:
-        b, n = source_sections(load_layout(d))
-        src_body += b
-        src_notes += n
+    if a.before:
+        dirs = expand(a.before, '原稿文件')
+        for f in dirs:
+            b, n = md_sections(open(f, encoding='utf-8').read())
+            src_body += '\n' + b
+            src_notes += '\n' + n
+    else:
+        dirs = [x for x in a.dir.split(',') if x.strip()]
+        for d in dirs:
+            if not os.path.isdir(d):
+                die('目录不存在: ' + ascii_path(d))
+        for d in dirs:
+            b, n = source_sections(load_layout(d))
+            src_body += b
+            src_notes += n
     md_body, md_notes = '', ''
     for f in mds:
         b, n = md_sections(open(f, encoding='utf-8').read())

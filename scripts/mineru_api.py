@@ -731,7 +731,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+def ascii_console() -> None:
+    """屏幕只打 ASCII：中文路径、中文报错在 GBK 控制台上是乱码，统一转成 \\uXXXX；逐行刷新，日志不再长时间空白。
+    pypdf 读某些扫描件会冒出 /MediaBox 警告，与结果无关，压掉。"""
+    import logging
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace", line_buffering=True)
+    if (getattr(sys.stdout, "encoding", "") or "").lower() not in ("ascii", "us-ascii"):
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="ascii", errors="backslashreplace", line_buffering=True)
+
+
 def main() -> int:
+    ascii_console()
     try:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(line_buffering=True)

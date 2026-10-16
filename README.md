@@ -1,12 +1,12 @@
 # md1012
 
-一套将 PDF（教材、论文、专著、竖排繁体古籍扫描件）转为史学研究可用的可信、高质量 Markdown 的工作流（Claude Code skill），产出 Obsidian 笔记，也适合喂给 AI。
+一套将 PDF（教材、论文、专著、横排点校古籍、竖排繁体古籍扫描件）转为史学研究可用的可信、高质量 Markdown 的工作流（Claude Code skill），产出 Obsidian 笔记，也适合喂给 AI。
 
 - **可信**：忠于原书，改字须有 PDF 原图为据并另出校注，改动报告由脚本逐字比对生成。
 - **高质量**：带脚注、多级标题、页码、图表、标点等信息。
 - **对得回原书**：正文每一行对到 PDF 页面上那一行的位置（竖排是那一列），可选生成带隐形文字层的 PDF。
 
-底稿通过 [MinerU](https://github.com/opendatalab/MinerU) 精准解析 API 取得，同时用 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) 官方 API 的 PaddleOCR-VL 再读一遍作第二位读者；竖排古籍只用 PaddleOCR-VL。两家都走云端 API，本机不用装模型。**PDF 会上传到 MinerU 与百度的服务器**，未刊稿、有版权或保密顾虑的材料请改用 MinerU 桌面软件手动解析。
+按版式分两条路线：横排书以 [MinerU](https://github.com/opendatalab/MinerU) 精准解析 API 的结果为底稿，[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) 官方 API 的 PaddleOCR-VL 再读一遍作第二位读者；竖排古籍反过来，以 PaddleOCR-VL 为底稿，MinerU 作第二位读者（拦 VL 编造、挑错字、补漏读的引号）。两家都走云端 API，本机不用装模型。**PDF 会上传到 MinerU 与百度的服务器**，未刊稿、有版权或保密顾虑的材料请改用 MinerU 桌面软件手动解析。
 
 ## 解决什么问题
 
@@ -23,7 +23,7 @@ MinerU 会输出一份 `full.md`，但它把页眉、页码、**脚注**标记�
 
 ## 用法
 
-在 Claude Code 中，给一个 PDF 或 MinerU 输出目录并说明需求即可，skill 会自动触发；首次使用会问几件事（怎么取得解析结果、要不要同时用 PaddleOCR-VL、成品放哪、要不要定期查新模型）。手动跑脚本：
+在 Claude Code 中，给一个 PDF 或 MinerU 输出目录并说明需求即可，skill 会自动触发；首次使用会问几件事（怎么取得解析结果、PaddleOCR 令牌、成品放哪、要不要定期查新模型）。手动跑脚本：
 
 ```bash
 python scripts/mineru_api.py configure                    # 首次安全保存 MinerU Token
@@ -53,7 +53,7 @@ python scripts/crop_pdf.py <origin.pdf> --page 2 --rect 65,545,300,559 -o crop.p
 
 ## 疑字判定
 
-两家同时解析的横排书，`vl_compare.py` 拿 PaddleOCR-VL 和成品正文逐页比，读法不同的字就是疑字；`doubt_sheets.py` 截整行原图拼图，交 AI 子代理看原图判定，把握低的发图给用户拍板，`apply_doubts.py` 按偏移写回正文（从后往前、核对原字、备份）。
+`vl_compare.py` 拿第二位读者和成品正文逐页比（横排书比 PaddleOCR-VL，竖排书比 MinerU），读法不同的字就是疑字；`doubt_sheets.py` 截整行原图拼图，交 AI 子代理看原图判定，把握低的发图给用户拍板，`apply_doubts.py` 按偏移写回正文（从后往前、核对原字、备份）。
 
 ## 红线
 
@@ -81,7 +81,9 @@ scripts/
   pdf_textlayer.py            按清单重建 PDF 隐形文字层（竖排整列一行）
   vl_common.py                VL 块标签与墨迹切行
   vl_build.py                 PaddleOCR-VL 作底稿时整理 Markdown（推断页码、按分隔线认注、拦编造内容）
-  vl_compare.py               正文与 PaddleOCR-VL 逐页比对，出疑字
+  vl_compare.py               正文与第二位读者逐页比对，出疑字（竖排书另出疑似编造、补标点线索）
+  merge_skeletons.py          拆卷解析的几份骨架接成整书（脚注续编、接缝接段）
+  punct_width.py              中文语境的半角标点统一为全角
   doubt_sheets.py             疑字截整行原图、拼图、给用户的分组拼图
   merge_judgement.py          合并各批 AI 判定、核对字段
   apply_doubts.py             把判定结果按偏移写回正文
@@ -91,7 +93,7 @@ references/
   mineru-api.md               MinerU 精准 API 限制、端点、配置与报告语义
   mineru-outputs.md           MinerU 产物文件各自有什么、缺什么
   templates.md                frontmatter / AI 校注 / 改动报告 模板
-  vl.md                       PaddleOCR-VL：第二位读者、竖排书底稿、实测
+  vl.md                       PaddleOCR-VL：横排书第二位读者、竖排书底稿；竖排书拿 MinerU 当第二读者的实测
   structure-audit.md          底稿的结构核查：顺序与理由、结果格式、实测的坑
   structure-prompts.md        结构核查各步的子代理提示词模板（派子代理时才读）
   ai-judging.md、judging-prompt.md   AI 看原图判定疑字

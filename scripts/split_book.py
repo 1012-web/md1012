@@ -43,7 +43,8 @@ BAD = '\\/:*?"<>|'
 def safe(name):
     for c in BAD:
         name = name.replace(c, '／' if c == '/' else '-')
-    return name.strip()
+    # 文件名不留空格：命令行里拼 --md 时空格最容易出错
+    return re.sub(r'\s+', '-', name.strip())
 
 
 def parse(path):
@@ -139,8 +140,7 @@ def main():
 
         pages = '-'.join(x for x in (c['start'], c['end']) if x) or ''
         head = ['---', 'title: %s' % c['title']]
-        head += [ln for ln in fm.split('\n')
-                 if ln.strip() and not re.match(r'^title\s*:', ln)]
+        head += clean_fm(fm, extra)
         head += ['%s: %s' % kv for kv in extra]
         if pages:
             head.append('pages: %s' % pages)
@@ -182,7 +182,9 @@ def main():
     print('chapters=%d notes_src=%d notes_placed=%d' % (len(rows), len(notes), used_all))
 
 
-BODY_TITLE = re.compile(r'^(第[一二三四五六七八九十百零〇两\d]+[章编篇部讲]|绪论|导论|引论|导言|结束语|结语|余论|尾论)')
+# 「序论」「緒論」是正文第一篇（带注），不是卷首的「序」（《儒学、数术与政治》的序论有 13 条注，曾被划进卷首）
+BODY_TITLE = re.compile(r'^(第[一二三四五六七八九十百零〇两\d]+[章编篇部讲編]|绪论|緒論|序论|序論|导论|導論|引论|引論'
+                        r'|导言|導言|结束语|結束語|结语|結語|余论|餘論|尾论|尾論)')
 
 
 def page_range(c):
@@ -214,9 +216,24 @@ def renumber(text, notes, counter, where):
     return out, [(remap[n], notes[n]) for n in used]
 
 
+def clean_fm(fm, extra):
+    """骨架带来的 frontmatter：去掉注释行、空值的占位键（build.py 写的 `author: `），
+    以及 --meta 也给了的同名键（--meta 为准）。否则会出现两个 author、两个 year，YAML 读不了。"""
+    given = {k.strip() for k, _ in extra} | {'title', 'pages'}
+    keep = []
+    for ln in fm.split('\n'):
+        if not ln.strip() or ln.lstrip().startswith('#'):
+            continue
+        m = re.match(r'^([^\s:#][^:]*?)\s*:\s*(.*?)\s*(?:#.*)?$', ln)
+        if m and (m.group(1) in given or m.group(2) in ('', '[]', '""', "''")) and not ln.startswith((' ', '-')):
+            continue
+        keep.append(ln)
+    return keep
+
+
 def frontmatter(title, fm, extra, pages, more=()):
     head = ['---', 'title: %s' % title]
-    head += [ln for ln in fm.split('\n') if ln.strip() and not re.match(r'^title\s*:', ln)]
+    head += clean_fm(fm, extra)
     head += ['%s: %s' % kv for kv in extra]
     if pages:
         head.append('pages: %s' % pages)
@@ -230,8 +247,12 @@ def merged(a, fm, extra, meta, notes, chapters):
     if a.level == 2:
         # 论文：整篇一份，注释在文末
         counter = [0]
-        text, used = renumber('\n\n'.join(b for c in chapters for b in c['blocks']), notes, counter, '全文')
-        pages = '-'.join(x for x in (chapters[0]['start'], chapters[-1]['end']) if x)
+        whole = '\n\n'.join(b for c in chapters for b in c['blocks'])
+        text, used = renumber(whole, notes, counter, '全文')
+        # 论文从全文第一个页码锚点算起：题名、摘要所在的首页在第一个小节标题之前，不能从小节标题算
+        first_anchor = ANCHOR.search(whole)
+        start = a.start_page or (first_anchor.group(1) if first_anchor else chapters[0]['start'])
+        pages = '-'.join(x for x in (start, chapters[-1]['end']) if x)
         out = frontmatter(book, fm, extra, pages) + text
         if used:
             out += '\n\n---\n\n## 注释\n\n' + '\n\n'.join(note_line(n, note) for n, note in used)

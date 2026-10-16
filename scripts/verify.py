@@ -11,7 +11,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import process_report, write_report
+from _common import latin_runs, mostly_chinese, process_report, split_notes, write_report
 
 BUILTIN = ('tags', 'aliases', 'cssclasses')
 BUILTIN_CN = {'标签': 'tags', '别名': 'aliases', '样式': 'cssclasses'}
@@ -52,9 +52,8 @@ def main():
                                 '必须写成英文 %s，否则会退化成普通文本字段' % (cn, en))
 
     # ---- 正文 / 注释 分区
-    parts = re.split(r'\n#+\s*注释\s*\n', text, maxsplit=1)
-    body = parts[0]
-    notes = parts[1] if len(parts) > 1 else ''
+    # 注释区可能每章一个（split_book.py 默认），全部剔掉才是正文
+    body, notes = split_notes(text)
     body = re.sub(r'>\s*\[!\w+\][^\n]*\n(?:>[^\n]*\n?)*', '', body)  # 去掉 callout（含 AI 校注）
 
     # ---- 脚注
@@ -78,6 +77,8 @@ def main():
     # 先剥掉行内代码/代码块：AI 校注里用反引号提到 `<sub>` 时不该被当成残留标签
     scan = re.sub(r'```.*?```', '', text, flags=re.S)
     scan = re.sub(r'`[^`\n]*`', '', scan)
+    # 条目号标记 <sup class="item">10</sup> 是我们有意加的（vl_build.py --item-numbers），不算残留
+    scan = re.sub(r'<sup class="item">[^<]*</sup>', '', scan)
     tags = re.findall(r'</?su[bp]>', scan)
     R.append('MinerU 标签残留: %d\n' % len(tags))
     if tags:
@@ -86,6 +87,19 @@ def main():
         n = text.count(mark)
         if n:
             problems.append('还有 %d 处 %s 待复核标记没处理' % (n, mark))
+    # vl_build.py 留下的待办记号：编造块、没放好的注号、待补录的图、猜出来的页码
+    for mark, what in (('<!--?vl-suspect', 'VL 疑似编造块（核原图后删除或照原书重录）'),
+                       ('<!--?fnref', '没放回原位的注号'),
+                       ('<!--?chart', 'VL 当成图、没读文字的块'),
+                       ('<!--?vl-missing', 'VL 缺页')):
+        n = text.count(mark)
+        if n:
+            problems.append('还有 %d 处 %s：%s' % (n, mark + '-->', what))
+
+    # ---- 中文书里的长段拉丁文：多半是模型在空白页编出来的（参考文献里的外文书目会误报，逐条看）
+    warnings = []
+    for frag in (latin_runs(body) if mostly_chinese(body) else []):
+        warnings.append('长段拉丁文（疑模型编造，外文引文/书目可忽略）：%s' % frag[:80])
 
     # ---- 页码锚点
     anchors = re.findall(r'<!--p\.([^>]+?)-->', body)
@@ -121,7 +135,9 @@ def main():
         R.append('## 全部通过\n')
     R.append('\n结构自检只管形式。内容有没有被改动，跑 diff_report.py。\n')
 
-    out = process_report(os.path.dirname(os.path.abspath(a.md)), '_verify.txt')
+    # 一本书有几个成品文件，各写各的报告，不互相覆盖
+    stem = os.path.splitext(os.path.basename(a.md))[0]
+    out = process_report(os.path.dirname(os.path.abspath(a.md)), '_verify_%s.txt' % stem)
     write_report(out, ''.join(R))
     print('refs=%d defs=%d tags=%d anchors=%d problems=%d'
           % (len(refs), len(defs), len(tags), len(anchors), len(problems)))

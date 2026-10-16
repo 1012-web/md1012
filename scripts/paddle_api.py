@@ -129,6 +129,17 @@ def submit_file(token: str, pdf: Path, model: str) -> str:
     return str(job_id)
 
 
+RETRY_WAIT = 10  # 秒；同一块失败后隔多久重交（测试里设 0）
+
+
+def log_error(out: Path, group: list[int], message: str) -> None:
+    """服务端的报错常含中文，GBK 控制台上只剩问号：完整原文按 UTF-8 追加进 <输出目录>/_errors.log。"""
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    with (out / "_errors.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} pages={group[0]}-{group[-1]} {message}\n")
+
+
 def poll_job(token: str, job_id: str, interval: float, timeout: float,
              sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
@@ -217,6 +228,7 @@ def run_submit(pdf: Path, out: Path, pages_arg: str | None, model: str, token: s
     out.mkdir(parents=True, exist_ok=True)
     (out / "_raw").mkdir(exist_ok=True)
     jobs = []
+    failed: list[dict[str, Any]] = []
     started = time.monotonic()
     queue = chunks(todo, CHUNK_PAGES)
     with tempfile.TemporaryDirectory(prefix="md1012-paddle-") as temp:
@@ -228,9 +240,23 @@ def run_submit(pdf: Path, out: Path, pages_arg: str | None, model: str, token: s
                 half = len(group) // 2
                 queue[:0] = [group[:half], group[half:]]
                 continue
-            job_id = submit_file(token, part, model)
-            print(f"SUBMITTED pages={group[0]}-{group[-1]} job={job_id}")
-            data = poll_job(token, job_id, interval, timeout)
+            # 服务端偶发 500（「OCR服务请求失败」）：同一块重交两次；仍失败就记下、接着交后面的块，
+            # 不让一块拖停整本。没交成的页重跑 submit 会自动补（已有的页跳过）
+            data, job_id, last_error = None, None, None
+            for attempt in range(3):
+                try:
+                    job_id = submit_file(token, part, model)
+                    print(f"SUBMITTED pages={group[0]}-{group[-1]} job={job_id} try={attempt + 1}", flush=True)
+                    data = poll_job(token, job_id, interval, timeout)
+                    break
+                except ClientError as exc:
+                    last_error = str(exc)
+                    log_error(out, group, last_error)
+                    print(f"RETRY pages={group[0]}-{group[-1]} (see _errors.log)", flush=True)
+                    time.sleep(RETRY_WAIT * (attempt + 1))
+            if data is None:
+                failed.append({"pages": [group[0], group[-1]], "error": last_error})
+                continue
             jsonl = fetch_text(data["resultUrl"]["jsonUrl"])
             (out / "_raw" / f"p{group[0]:04d}-{group[-1]:04d}.jsonl").write_text(jsonl, encoding="utf-8")
             records = page_records(jsonl)
@@ -242,8 +268,9 @@ def run_submit(pdf: Path, out: Path, pages_arg: str | None, model: str, token: s
             jobs.append({"pages": [group[0], group[-1]], "jobId": job_id,
                          "extractProgress": data.get("extractProgress")})
             record_usage(len(group))
+    parsed = len(todo) - sum(f["pages"][1] - f["pages"][0] + 1 for f in failed)
     summary = {"pdf": str(pdf), "model": model, "source": "paddleocr-api", "requested": len(wanted),
-               "skippedExisting": len(wanted) - len(todo), "parsed": len(todo), "jobs": jobs,
+               "skippedExisting": len(wanted) - len(todo), "parsed": parsed, "jobs": jobs, "failed": failed,
                "seconds": round(time.monotonic() - started, 1),
                "finishedAt": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     previous = read_json(out / "_run.json", {})
@@ -336,7 +363,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+def ascii_console() -> None:
+    """屏幕只打 ASCII：中文路径、中文报错在 GBK 控制台上是乱码，统一转成 \\uXXXX；逐行刷新，日志不再长时间空白。
+    pypdf 读某些扫描件会冒出 /MediaBox 警告，与结果无关，压掉。"""
+    import logging
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace", line_buffering=True)
+    if (getattr(sys.stdout, "encoding", "") or "").lower() not in ("ascii", "us-ascii"):
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="ascii", errors="backslashreplace", line_buffering=True)
+
+
 def main() -> int:
+    ascii_console()
     args = build_parser().parse_args()
     try:
         if args.command == "configure":
@@ -345,6 +387,11 @@ def main() -> int:
         elif args.command == "submit":
             summary = run_submit(args.pdf, args.out, args.pages, current_model(args.model),
                                  load_token(args.token_file), args.interval, args.timeout)
+            if summary["failed"]:
+                ranges = ",".join(f"{a}-{b}" for a, b in (f["pages"] for f in summary["failed"]))
+                print(f"PARTIAL model={summary['model']} parsed={summary['parsed']} failed_pages={ranges} "
+                      "(rerun submit to fill them in; details in _errors.log)")
+                return 2
             print(f"OK model={summary['model']} parsed={summary['parsed']} skipped={summary['skippedExisting']} "
                   f"seconds={summary['seconds']}")
         elif args.command == "check-models":
@@ -357,7 +404,8 @@ def main() -> int:
             write_json(settings_path(), settings)
             print(f"MODEL {args.model}")
     except ClientError as exc:
-        print("ERROR " + str(exc).encode("ascii", "replace").decode("ascii"))
+        # 中文报错在 GBK 控制台上是乱码：转成 \uXXXX，至少能还原（提交阶段的原文另有 _errors.log）
+        print("ERROR " + str(exc).encode("ascii", "backslashreplace").decode("ascii"))
         return 1
     return 0
 

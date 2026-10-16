@@ -102,4 +102,4 @@ def test_body_range_can_be_given_explicitly_and_split_stays_available(tmp_path: 
     out = run(tmp_path, "--body", "3-5")  # 把后记也算进正文
     assert sorted(p.name for p in out.glob("[0-9]*.md")) == ["01-书名与出版信息.md", "02-目录.md", "03-正文.md"]
     split = run(tmp_path / "拆", "--split")
-    assert "03-第一章 甲.md" in {p.name for p in split.glob("*.md")}
+    assert "03-第一章-甲.md" in {p.name for p in split.glob("*.md")}

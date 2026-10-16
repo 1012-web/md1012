@@ -3,9 +3,10 @@
 用法:
     python probe.py <mineru输出目录>
 
-产出:
-    <目录>/_probe.txt    结构报告（用 Read 工具看）
-    <目录>/_markers.tsv  正文里每个圈码的全局序号与上下文——必须逐行扫一遍
+产出（目录在书文件夹的 _数据/ 里时写进 <书>/_数据/过程报告/，拆卷的文件名带卷标；否则写在目录里）:
+    _probe.txt    结构报告（用 Read 工具看）
+    _markers.tsv  正文里每个圈码的全局序号与上下文——必须逐行扫一遍
+    _breaks.tsv   疑似漏合并的跨页段落
 """
 import collections
 import json
@@ -15,8 +16,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (CIRC, CIRC_RE, OPENER, TERMINAL, block_text, body_blocks, die,
-                     discarded_of_type, find_files, footnote_blocks, load_blocklist,
-                     load_layout, page_number_map, strip_tags, write_report)
+                     discarded_of_type, find_files, footnote_blocks, latin_runs, line_texts, mostly_chinese,
+                     load_blocklist, load_layout, page_number_map, report_path, strip_tags, write_report)
 
 META_PREFIX = ('收稿日期', '作者简介', '基金项目', '通信作者', '引用格式', '作者单位', 'DOI')
 
@@ -106,7 +107,7 @@ def extra_checks(layout, merge, pnum, R, outdir):
         R.append('  接合结果见构建报告。下面只是前 12 条预览。\n')
         for pn, a, b_ in breaks[:12]:
             R.append('  p.%s…%s  ▷接▷  %s…\n' % (pn, a, b_))
-        write_report(os.path.join(outdir, '_breaks.tsv'),
+        write_report(report_path(outdir, '_breaks.tsv'),
                      '印刷页\t上页结尾\t下页开头\n'
                      + ''.join('%s\t%s\t%s\n' % (pn, a.replace('\t', ' '), b_.replace('\t', ' '))
                                for pn, a, b_ in breaks))
@@ -144,7 +145,11 @@ def extra_checks(layout, merge, pnum, R, outdir):
         if tail:
             break
     cut = tail and tail[-1] not in TERMINAL
-    if first_pn > 1 or cut:
+    # mineru_api.py 拆卷提交的分卷（目录名带 pages-0001-0200）本来就不是整本：只有末卷才查结尾截断
+    vol = re.search(r'pages-(\d+)-(\d+)', os.path.basename(os.path.normpath(outdir)))
+    if vol:
+        R.append('\n## 本目录是拆卷后的一卷（物理页 %s—%s），不查「是否整本」\n' % (int(vol.group(1)), int(vol.group(2))))
+    elif first_pn > 1 or cut:
         hits += 1
         R.append('\n## [检查] 这份 PDF 可能不是完整的一本\n')
         R.append('  印刷页码 %s — %s%s\n' % (first_pn, last_pn,
@@ -167,8 +172,70 @@ def extra_checks(layout, merge, pnum, R, outdir):
         for n, c in kinds:
             R.append('  %-28s %d\n' % (n, c))
 
+    # 7) 中文书里的长段拉丁文：模型在空白页上「自言自语」（实测 MinerU 在空白页写出
+    #    「The Ground Truth image …」一整段）。外文引文、书目也会报出来，逐条看
+    latin = []
+    chinese_book = mostly_chinese(''.join(strip_tags(block_text(b)) for pg in layout for b in body_blocks(pg)))
+    for pi, pg in enumerate(layout if chinese_book else []):
+        for b in body_blocks(pg):
+            for frag in latin_runs(strip_tags(block_text(b))):
+                latin.append((pnum[pi], frag))
+    if latin:
+        hits += 1
+        R.append('\n## [检查] 长段拉丁文，%d 处\n' % len(latin))
+        R.append('  中文书里连着 8 个以上英文单词，多半是模型在空白页、插图页编出来的。裁原图看：\n')
+        R.append('  原书没有就从骨架里删掉并写进交付报告；外文引文、外文书目照留。\n')
+        for pn, t in latin[:12]:
+            R.append('  p.%s  %s\n' % (pn, t[:90]))
+
+    # 8) 目录页 ↔ 标题：目录里有、骨架标题里没有的条目。章首页的大字章题常被当成页眉丢掉
+    #    （《儒学、数术与政治》8 个章题只剩「第四章」），这类丢失其他检查都抓不到
+    titles = [re.sub(r'\s+', '', strip_tags(block_text(b))) for pg in layout for b in body_blocks(pg)
+              if b.get('type') == 'title']
+    # 「第一章 溯源/9」「一、道德之天的产生……10」：题目以汉字或括号收尾，与页码之间有 / … · 或空格隔开
+    # （版权页的「编辑部62752015」没有隔开，不算）
+    toc_line = re.compile(r'^(.{1,40}?[一-鿿》）)])\s*(?:[…·．.]{2,}|[/／]|\s)\s*(\d{1,4})$')
+    entries = []
+    for pi, pg in enumerate(layout[:40]):
+        # vlm 后端常把整块目录放进一个 span，行与行之间是 \n：按 \n 拆开再一行行认
+        lines = [strip_tags(t).strip() for b in body_blocks(pg) for ln in line_texts(b) for t in ln.split('\n')]
+        hits_here = [toc_line.match(t) for t in lines if t]
+        hits_here = [m for m in hits_here if m]
+        if len(hits_here) >= 5:  # 一页上 5 行以上「标题……页码」才算目录页
+            entries += [(pnum[pi], re.sub(r'[\s…·．.]+', '', m.group(1))) for m in hits_here]
+    def han(s):
+        return ''.join(re.findall(r'[一-鿿]', s))
+    han_titles = [han(t) for t in titles if han(t)]
+    missing = [(pn, e) for pn, e in entries
+               if len(han(e)) >= 2 and not any(han(e)[:6] in t or t[:6] in han(e) for t in han_titles)]
+    if entries and missing:
+        hits += 1
+        R.append('\n## [检查] 目录里有、正文标题里找不到的条目，%d / %d 条\n' % (len(missing), len(entries)))
+        R.append('  多半是章首页的大字章题被当成页眉丢了，也可能是目录与正文用字不同。逐条裁章首页看，\n')
+        if vol:
+            R.append('  本目录是拆卷的一卷：目录里属于其他卷的条目也会列在这里，对照页码跳过。\n')
+        R.append('  确是漏了就照原图补回标题（写进交付报告的「内容补入」）。\n')
+        for pn, e in missing[:20]:
+            R.append('  目录 p.%s  %s\n' % (pn, e))
+
+    # 9) 疑似误升的标题：带句号、逗号，或很长——多半是一段普通正文被按版面位置当成了标题
+    odd = []
+    for pi, pg in enumerate(layout):
+        for b in body_blocks(pg):
+            if b.get('type') != 'title':
+                continue
+            t = strip_tags(block_text(b)).strip()
+            if len(t) > 30 or re.search(r'[。，；]$|[，。；].{6,}', t):
+                odd.append((pnum[pi], t))
+    if odd:
+        hits += 1
+        R.append('\n## [检查] 疑似误升的标题，%d 个\n' % len(odd))
+        R.append('  带句读或很长的「标题」多半是普通正文。对照原图，不是标题就在骨架里降回段落。\n')
+        for pn, t in odd[:12]:
+            R.append('  p.%s  %s\n' % (pn, t[:60]))
+
     if not hits:
-        R.append('\n## [检查] 6 项自动检查全部未发现异常\n')
+        R.append('\n## [检查] 9 项自动检查全部未发现异常\n')
     return hits
 
 
@@ -339,8 +406,8 @@ def main():
     R.append('  2. 逐条核对上面 [检查] 段报出的疑点\n')
     R.append('  3. python build.py %s -o _skeleton.md [--skip-marker 序号,序号]\n' % d)
 
-    write_report(os.path.join(d, '_probe.txt'), ''.join(R))
-    write_report(os.path.join(d, '_markers.tsv'), ''.join(T))
+    write_report(report_path(d, '_probe.txt'), ''.join(R))
+    write_report(report_path(d, '_markers.tsv'), ''.join(T))
     print('pages=%d footnotes=%d markers=%d aligned=%s'
           % (len(layout), total_fn, total_marks, total_marks == total_fn))
 
