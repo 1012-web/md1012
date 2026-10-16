@@ -7,7 +7,6 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-import sync_mapper as mapper
 
 BOOK = """---
 title: 测试书
@@ -83,14 +82,13 @@ def test_body_is_one_file_with_continuous_notes_at_each_chapter_end(tmp_path: Pa
     assert not (out / "_split_report.txt").exists() and (out / "_数据" / "过程报告" / "_split_report.txt").exists()
 
 
-def test_chapter_metadata_gives_the_mapper_each_chapter_first_page(tmp_path: Path) -> None:
+def test_chapter_metadata_records_each_chapter_title_and_first_page(tmp_path: Path) -> None:
     out = run(tmp_path, "--start-page", "1")
     body = (out / "03-正文.md").read_text("utf-8")
     front = re.match(r"^---\n(.*?)\n---\n", body, re.S).group(1)
     assert "footnotes: 全书正文连续编号；注释在各章末尾" in front
-    pages = mapper.chapter_start_pages(front)
-    assert pages[mapper.normalized_title("第一章 甲")] == 1
-    assert pages[mapper.normalized_title("第二章 乙")] == 2
+    entries = re.findall(r"title: (.+)\n(?:.*\n)*?\s+pages: (\d+)", front.split("chapter_metadata:")[1])
+    assert ("第一章 甲", "1") in entries and ("第二章 乙", "2") in entries
 
 
 def test_index_links_body_chapters_by_heading(tmp_path: Path) -> None:

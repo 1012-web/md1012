@@ -1,4 +1,4 @@
-"""把 AI 看原图判定的结果写回正文（书不在 Obsidian 库里、不走笔记1012 插件时用）。
+"""把 AI 看原图判定的结果写回正文。
 
 读 <判定目录>/manifest.json（doubt_sheets.py crops 写的）与全部 judgement-b*.json，按 references/ai-judging.md 的执行规则：
 把握高的 B/C 改成原书的字（有 variant 时按异体字方针：keep 用原书字形、normalize 用规范字）；A 认可；

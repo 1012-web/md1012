@@ -12,5 +12,4 @@ _skeleton.md
 # 绝不提交待处理的文献原文与解析产物（版权）
 *.pdf
 *.json
-!scripts/sync-source.json
 images/

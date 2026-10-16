@@ -3,7 +3,7 @@
 两步：
   pages  推断每页的印刷页码，写报告（VL 读页码噪声大，插页又会让偏移量中途变化，所以不能直接用）：
          能解析的页码只有与前后页偏移一致才采信；两个可信页偏移相同，中间的页按它补齐；
-         偏移变了的地方就是插页，报告里列出，供定分段与映射配置的 pageRangeOffsets。
+         偏移变了的地方就是插页，报告里列出，供定分段与书配置的页码偏移。
   build  按 --segment 把页分成几个文件（如 目录、前言、正文各一个），整理成 Markdown：
          页码锚点 <!--p.N-->（印刷页；推不出的页写 <!--physical N-->）；doc_title 为 #、paragraph_title 为 ##；
          页下注：以〔一〕（一）之类开头的块、以及同页它左边（竖排）或下面（横排）的块都算注，同页注号换成 [^n]，
@@ -12,7 +12,7 @@
          页眉、页脚、页码、图、表不收（图表位置留 <!--?figure--> 记号）。□（原书缺字）照录。
 
 VL 会按上下文「规范化」，本脚本只做结构整理与字形表替换，字句不猜；交付前照常跑 verify.py、
-diff_report.py（与 MinerU 比），疑字走 vl_compare 的反向（与 MinerU、PP-OCR 比）和看原图判定。
+diff_report.py（与 MinerU 比），VL 作底稿时没有第二位读者，不出疑字清单；结构问题交结构核查（structure_audit.py）。
 
 用法：
   python -X utf8 vl_build.py pages --vl-dir <书>/_数据/VL --pages 1-497 --report <书>/_数据/过程报告/_vl_pages.json
@@ -250,10 +250,10 @@ def note_separator(pdf_page, vertical: bool) -> float | None:
 def char_size(pdf_page, rect: tuple[float, float, float, float], vertical: bool) -> float | None:
     """块里字的大小：按墨迹投影切出的列宽（竖排）或行高（横排）的中位数，归一化到页面。小字夹注据此认出。"""
     try:
-        from vl_supplement import ink_lines
+        from vl_common import ink_lines
     except ImportError:  # 作为模块被测试加载时
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from vl_supplement import ink_lines
+        from vl_common import ink_lines
     lines = ink_lines(pdf_page, rect, vertical)
     sizes = sorted((line[2] - line[0]) if vertical else (line[3] - line[1]) for line in lines)
     return sizes[len(sizes) // 2] if sizes else None
@@ -455,7 +455,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
     counter = 0
     stats = Counter()
     paragraph_open = False
-    # 整段都没有页码（封面、版权页）：物理页即页码（映射配置里这个文件偏移为 0）
+    # 整段都没有页码（封面、版权页）：物理页即页码（书配置里这个文件偏移为 0）
     unnumbered = all(printed.get(page) is None for page in range(first, last + 1))
     last_offset = None
     for page in range(first, last + 1):
@@ -572,7 +572,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
             if number not in used:
                 out[-1] += f"<!--?fnref {global_number}-->"
                 stats["unplacedNoteRefs"] += 1
-    # 映射配置要的页码偏移：文件基本偏移（第一段），插页之后偏移变了的各段写成 pageRangeOffsets
+    # 书配置要的页码偏移：文件基本偏移（第一段），插页之后偏移变了的各段写成 pageRangeOffsets
     runs: list[list[int]] = []  # [印刷起, 印刷止, 偏移]
     for page in range(first, last + 1):
         number = page if unnumbered else printed.get(page)

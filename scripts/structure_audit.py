@@ -1,6 +1,6 @@
 """OCR 底稿（尤其 VL 底稿）的结构核查：页下注是否收全、篇题是否读丢、正文里的残留，统一按页改。
 
-VL 读古籍时有几类系统性毛病，逐字映射查不出来（它只比字，不管结构）：整条注漏收或混进正文、
+VL 读古籍时有几类系统性毛病，疑字比对查不出来（它只比字，不管结构）：整条注漏收或混进正文、
 两注并成一条、篇题整行读丢、书眉与注号残字夹进句子。本脚本出核对材料、出按页任务、执行改动：
 
   notes-sheet  每页按分隔线裁出注区，配上 Markdown 里记在这一页的注，4 页拼一张图，写 manifest.json。
@@ -59,7 +59,7 @@ class Book:
             name, value = item.rsplit("|", 1)
             self.offsets[name] = int(value)
         self.vertical = cfg.get("writingMode") == "vertical-rl"
-        # 本书字形表：每组第一个字是原书字形（variantEquivalents 按这个顺序写）
+        # 本书字形表：每组第一个字是原书字形（书配置 config.json 的 variantEquivalents 按这个顺序写）
         self.variants = cfg.get("variantEquivalents", [])
 
     def text(self, name: str) -> str:

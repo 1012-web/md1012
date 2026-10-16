@@ -1,7 +1,7 @@
 """按校订后的 Markdown 重建 PDF 的隐形文字层（「校订版 PDF」）。
 
-逐字映射给出了每个字在原页上的位置；Obsidian 插件笔记1012 把「当前正文的每个字 + 它在原页上的框」
-导出成一份清单（spec），本脚本据此：
+逐行映射（line_map.py --spec）把「当前正文的每个字 + 它在原页上的框」导出成一份清单（spec）：
+框是把每行的字沿书写方向在行框里均分得来的，选中、搜索能落到行。本脚本据此：
 
 1. 删掉每页原有的文字层，只删文字、不动图片与线条；删之前后各渲染一次低分辨率图逐像素比较，
    外观有变（说明那页的文字本来就看得见）就保留原页不动，写进报告。
@@ -262,7 +262,7 @@ def build(
         results.append(result)
     stamp = datetime.now().strftime("%Y-%m-%d")
     metadata = dict(work.metadata or {})
-    note = f"text layer rebuilt from corrected Markdown by note1012 / mineru pdf_textlayer on {stamp}"
+    note = f"text layer rebuilt from corrected Markdown by md1012 pdf_textlayer on {stamp}"
     metadata["keywords"] = f"{metadata.get('keywords') or ''} {note}".strip()
     work.set_metadata(metadata)
     work.subset_fonts()
@@ -316,7 +316,7 @@ def find_copies(pdf: Path, root: Path) -> list[str]:
 def replace(target: Path, source: Path, backup_dir: Path | None, expect_sha256: str) -> dict[str, Any]:
     """先确认目标还是预期的那份，备份到 backup_dir（为 None 时不备份），再原子替换。
 
-    不备份只用于自动同步：那时目标是插件上次自己写进去的文件，原件在第一次覆盖时已备份。
+    不备份只用于反复重建同一份：那时目标是上次自己写进去的文件，原件在第一次覆盖时已备份。
     """
     current = sha256(target)
     if current != expect_sha256:
@@ -328,7 +328,7 @@ def replace(target: Path, source: Path, backup_dir: Path | None, expect_sha256: 
         shutil.copy2(target, backup)
         if sha256(backup) != current:
             raise RuntimeError("backup copy does not match the original; target left untouched")
-    temporary = target.with_name(target.name + ".note1012-tmp")
+    temporary = target.with_name(target.name + ".md1012-tmp")
     shutil.copyfile(source, temporary)
     os.replace(temporary, target)
     return {"target": str(target), "backup": str(backup) if backup else None, "backupSha256": current, "newSha256": sha256(target)}
