@@ -1,11 +1,11 @@
-# 古籍酷与看典古籍 OCR API
+# 古籍酷与看典古籍 OCR 接口
 
-看典可作为古籍按页文字来源的第二读者，现代出版物使用 VL 文字时也可按需采用。两条材料流程由 SKILL.md 决定，不以竖排直接归为影印古籍。古籍酷 Chat 保留为用户指定的备用测试接口。已有缓存直接复用；仅实际需要调用时检查状态及额度。新材料先抽样核图，保留原始响应，不直接覆盖正文。
+两家在工作流里的角色见 [SKILL.md](../SKILL.md)「识别来源各管什么」。本页只写调用、凭据、作为第二读者的参数和续跑规则。已有缓存直接用；只在真要调用时查状态和额度。
 
 ## 古籍酷（GJ.cool）Chat
 
 - 官方公开说明：[Chat](https://www.gj.cool/chat)。`ocr` 与网页版、传统 API 的 OCR 能力相同，Chat 是 OpenAI 兼容封装，不是生成式聊天模型。
-- 账户提供 Base URL 与 API Key；用 `scripts/gjcool_api.py configure` 隐藏输入保存。环境变量为 `GJCOOL_BASE_URL`、`GJCOOL_API_KEY`。
+- 账户提供 Base URL 与 API Key；用 `gjcool_api.py configure` 隐藏输入保存。环境变量为 `GJCOOL_BASE_URL`、`GJCOOL_API_KEY`。
 - `POST <base>/chat/completions`；仅在 404 时再试 `<base>/v1/chat/completions`。Base 已含 `/v1` 时不重复追加。完整端点也可作为 Base。
 - 图片以 JPEG data URL 放进 `messages[].content[].image_url`，`model=ocr`、`stream=false`。
 - Chat 响应保存为 `pNNNN.json`，正文取 `choices[0].message.content`，另存 `pNNNN.txt`。本接口不保证返回行或字符坐标。
@@ -37,19 +37,16 @@ python -X utf8 <skill>/scripts/kandian_api.py submit <PDF> -o <输出目录> --p
 - 实测 `words[].choices` 是包含多个候选字的字符串，与文档数组示例不同，应同时兼容两种形式。`text_lines[].position` 与 `layout[].position` 也不能直接假定共用坐标系：300 DPI、`image_size=2000` 的样本返回 `width=1826,height=2688`，文字行坐标对应原渲染图，版面坐标则表现为缩小后的尺度；映射 PDF 前必须核图和比例。
 - 官方文档已将 PDF 直传接口标为停用；客户端逐页渲染后调用图片 OCR。
 
-## 作为第二识别者接入疑字流程
+## 看典作为第二读者
 
-```powershell
-python -X utf8 <skill>/scripts/vl_compare.py --book <书> --line-map <书>/_数据/逐行映射/line-map.json --kandian "<书>/_数据/看典|1" --pages 1-10 --out <书>/_数据/疑字判定
-```
+比对流程见 [doubt-check.md](doubt-check.md)。看典特有的部分：
 
-`--kandian` 可重复给分卷；`目录|21` 表示该目录的 `p0001.json` 对应原 PDF 物理第 21 页，`p0003.json` 则对应第 23 页。不连续抽页可写 `目录|107,142,145`，列表须与页文件数一致。同一物理页不可重复。`--kandian`、`--vl-dir`、`--mineru` 三选一；多家交叉核查时用不同输出目录。
-
-读取器只比较 `message=success` 的页；有 `_run.json` 时还要求页状态为成功。按 API 返回顺序拼接文字行，排除明确标为 `layout_classes_id=1` 的书眉/版心；可能误标的短纲文、标题仍要从原始结果做结构核查。不带行结构时兼容默认文本数组。
-
-沿用底稿的行映射生成 `doubts.json`，可直接交给现有裁图、判定、执行工具。看典坐标和候选字仍留在原始 JSON 供核查，不直接替换底稿坐标；暂未把候选字自动合并到疑字对象。标点单独输出页级线索，条目号倒序保留为分歧，不自动修正。
-
-`--pages` 指定本次原 PDF 页范围；字形表默认读取书配置，`--variant` 显式覆盖。`_reader_coverage.json` 只对本次范围记录实际比较、第二读者缺页及正文未映射页，不要求补跑范围外页面；覆盖不全退出码为2。看典的“大段差异”只交结构核查，不直接标为 VL 编造。
+- `--kandian "<目录>|21"`：该目录的 `p0001.json` 对应原 PDF 物理第 21 页，`p0003.json` 对应第 23 页。不连续抽页写 `<目录>|107,142,145`，列表须与页文件数一致。可重复给分卷；同一物理页不可重复。
+- 只比较 `message=success` 的页；有 `_run.json` 时还要求页状态为成功。
+- 按 API 返回顺序拼接文字行，排除明确标为 `layout_classes_id=1` 的书眉/版心；可能误标的短纲文、标题仍要从原始结果做结构核查。不带行结构时兼容默认文本数组。
+- 看典坐标和候选字留在原始 JSON 供核查，不替换底稿坐标，也暂未并入疑字条目。
+- 标点单独输出页级线索；条目号倒序保留为分歧，不自动修正。
+- 看典的大段差异只交结构核查，不直接标为 VL 编造。
 
 2026-10-17 单页核图参考共 423 个汉字，忽略列明异体后看典全部匹配；连标点和数字的字符得分为 91.46%。此为单页结果，不能当成全书准确率。
 
@@ -60,6 +57,5 @@ python -X utf8 <skill>/scripts/vl_compare.py --book <书> --line-map <书>/_数�
 - 仅跳过已记录成功、且存盘 JSON 仍能提取正文的页；错误 JSON 不阻止续跑。
 - 同一输出目录拒绝混用不同 PDF、分辨率或 OCR 参数。切换模型、版面参数时建新目录。旧报告没有 PDF 校验值且有成功页时，也建新目录。
 - 只对连接失败、408、429 和暂时性服务器错误最多重试两次；401/403 和 API 业务拒绝立即停止。失败或未完成返回退出码 2，参数/配置错误返回 1，全成功返回 0。
-- 对照其它 OCR 的字符差异只表示分歧；未逐字核原图，不能称作准确率。标点、标题、脚注和坐标也要分别检查。
 
 2026-10-17 的《明通鉴》第 21–30 页实测记录位于项目 `api-tests/2026-10-17/`；该目录属于试跑材料，不随 skill 分发。

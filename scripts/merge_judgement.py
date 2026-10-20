@@ -8,7 +8,9 @@ import re
 import sys
 from pathlib import Path
 
-REQUIRED = ("n", "minerU", "ocr", "verdict", "confidence", "reason")
+from content_state import upgrade_legacy
+
+REQUIRED = ("n", "current", "ocr", "verdict", "confidence", "reason")
 VERDICTS = {"A", "B", "C", "D"}
 
 
@@ -53,7 +55,7 @@ def main() -> None:
         raise SystemExit(f"{folder} 里没有 judgement-bN.json")
     merged = []
     for path in files:
-        merged.extend(json.loads(path.read_text("utf-8")))
+        merged.extend(upgrade_legacy(item) for item in json.loads(path.read_text("utf-8")))
     problems = problems_of(merged, manifest)
     print("batches", len(files), "items", len(merged))
     if problems:
@@ -65,10 +67,10 @@ def main() -> None:
     (folder / "judgement.json").write_text(json.dumps(merged, ensure_ascii=False, indent=1), "utf-8")
 
     change = [i for i in merged if i["verdict"] in ("B", "C") and i["confidence"] == "高"]
-    groups = collections.Counter((i["minerU"], target(i)) for i in change)
+    groups = collections.Counter((i["current"], target(i)) for i in change)
     print("要改字（把握高）", len(change))
     for (before, after), count in groups.most_common():
-        sample = next(i for i in change if i["minerU"] == before and target(i) == after)
+        sample = next(i for i in change if i["current"] == before and target(i) == after)
         print(f"  {before}→{after} ×{count}  例 {sample.get('page', '')} {manifest[sample['n']]['context']}")
     misprints = [i for i in merged if i.get("misprint") and i["confidence"] == "高"]
     print("原书误植（照录出校记）", [(i.get("page", ""), manifest[i["n"]]["context"], i["misprint"]) for i in misprints])
@@ -76,7 +78,7 @@ def main() -> None:
     print("把握低", len(low))
     for i in low:
         print(f"  #{i['n']} {i.get('page', '')} PDF{manifest[i['n']]['pdfPage']} {manifest[i['n']]['context']} "
-              f"正文「{i['minerU']}」 判{i['verdict']}→「{i.get('correct') or ''}」 {i['reason'][:40]}")
+              f"正文「{i['current']}」 判{i['verdict']}→「{i.get('correct') or ''}」 {i['reason'][:40]}")
 
 
 if __name__ == "__main__":

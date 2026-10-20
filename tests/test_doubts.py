@@ -36,7 +36,7 @@ def test_small_disagreements_become_doubts_with_offsets_and_page(tmp_path: Path)
     assert compared == 1 and large == []
     (doubt,) = doubts
     text = files[0].read_text(encoding="utf-8")
-    assert doubt["minerU"] == "事" and doubt["ocr"] == "" and text[doubt["from"]:doubt["to"]] == "事"
+    assert doubt["current"] == "事" and doubt["ocr"] == "" and text[doubt["from"]:doubt["to"]] == "事"
     assert doubt["page"] == "p.12" and doubt["pdfPage"] == 22 and doubt["rect"] == [0.1, 0.2, 0.9, 0.23]
     assert doubt["context"].startswith("银行**事**业")  # 页码锚点不进前后文
 
@@ -45,11 +45,11 @@ def test_missing_char_is_an_insertion_and_markup_spans_go_to_large(tmp_path: Pat
     files, line_map, vl = book(tmp_path, "银行事业的发展。第纳尔与第尔汗。金币币")
     doubts, large, _ = vl_compare.compare(files, line_map, vl, {})
     (doubt,) = doubts
-    assert doubt["minerU"] == "" and doubt["ocr"] == "币" and doubt["from"] == doubt["to"]
+    assert doubt["current"] == "" and doubt["ocr"] == "币" and doubt["from"] == doubt["to"]
     # 跨过注号的分歧不进疑字：照偏移替换会把 [^1] 一起删掉
     files, line_map, vl = book(tmp_path, "银行事业的发展。第纳乙丙第尔汗。金币")
     doubts, large, _ = vl_compare.compare(files, line_map, vl, {})
-    assert doubts == [] and large == [{"pdfPage": 22, "minerU": "尔与", "ocr": "乙丙"}]
+    assert doubts == [] and large == [{"pdfPage": 22, "current": "尔与", "ocr": "乙丙"}]
 
 
 def test_doubt_sheets_crop_whole_lines_and_write_manifest(tmp_path: Path) -> None:

@@ -1,35 +1,43 @@
 # md1012
 
-将历史研究用 PDF 整理为忠于原件、可核对出处的 Markdown。提供两条工作流，共用 AI 看目录重建标题层级和原图核字。
+一个 Claude Code skill：把历史研究用的 PDF 整理成忠于原件、可核对出处的 Markdown，适合做 Obsidian 笔记，也适合交给 AI 检索。
 
-| 工作流 | 材料 | 默认产出要求 |
+- **忠于原件**：改字必须有 PDF 原图为据，校注与正文分开，改动报告由脚本逐字比对生成。
+- **结构完整**：多级标题、页码，现代出版物另有脚注、图表和原有标点。
+- **对得回原书**：正文能定位到 PDF 的页（现代出版物通常能到行或列）。
+
+## 两条工作流
+
+| 工作流 | 材料 | 重点 |
 |---|---|---|
-| A：论文和现代出版物 | 论文、专著、教材、现代重新排字的点校古籍 | 正文、脚注关系、多级标题、页码、图表和原有标点 |
-| B：非现代排印古籍 | 刻本、旧刊本、抄本等原页扫描或影印 | 页码/叶码、多级标题、识字核对；保留夹注文字 |
+| A：论文和现代出版物 | 论文、专著、教材、现代重新排字的点校古籍（横排竖排都算） | 正文、脚注关系、多级标题、页码、图表、原有标点 |
+| B：非现代排印古籍 | 刻本、旧刊本、抄本等原页的扫描或影印 | 页码/叶码、多级标题、识字核对；保留夹注文字 |
 
-现代竖排排印本走 A；现代出版的旧版影印集未重新排字仍走 B。横竖排不是工作流主分类。
+两条都由 AI 看目录原图重建标题层级，并用第二家识别结果对照原图核字。
 
-有目录时，AI 看目录原页，记录层级、父项、原题和页码，提出标题树，再与正文核对后应用。无目录时依据正文可见标题，不发明目录或小题。目录与正文异名分别保留。
+## 识别服务与隐私
 
-A 优先恢复 MinerU 原始 JSON 中已有但 full.md 漏掉的脚注、页码、图表等。VL 和看典可以协助识字；MinerU 的区域框与结构若可用则保留。B 可以直接按页利用 VL 文字并交叉核字，不强制恢复复杂脚注工程、精细字号行款、逐行坐标或文字层 PDF。
+识别走云端 API，本机不用装模型：[MinerU](https://github.com/opendatalab/MinerU) 精准解析、[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)-VL，古籍另可用看典、古籍酷。**PDF 会上传到这些服务的服务器**；未刊稿、有版权或保密顾虑的材料，请改用本地软件解析后再交给本 skill 整理。密钥用各脚本的 `configure` 在本机隐藏输入保存，不写进仓库。
 
-入口为 [SKILL.md](SKILL.md)，分支见 [现代出版物](references/modern-publications.md)、[非现代排印古籍](references/historical-editions.md)，[流程图](references/workflow.md)与[目录标题步骤](references/toc-headings.md)提供总览和操作细节。
+## 安装与使用
 
-## 已有结果与局部任务
+把本仓库放进 Claude Code 的 skills 目录（或用 skill 管理工具链接过去）。在 Claude Code 里给出 PDF 或已有的识别结果并说明需求，skill 会自动触发。
 
-可以直接从缓存、已有 Markdown 或指定页开始，不必重跑解析或配置无关服务。比较脚本支持请求页范围，自动读取书配置字形表；正文版本变化后拒绝旧映射。截图记录真实第二读者，纠错批次可重跑而不重复插字。
+脚本需要 Python 3（在 3.13 上测试），以及 `pymupdf`、`pypdf`、`Pillow`、`numpy`、`PyYAML`。
 
-```powershell
-python -X utf8 scripts/line_map.py --pdf <原件.pdf> --md <正文.md> --page-only --out <页级映射目录>
-python -X utf8 scripts/vl_compare.py --book <书目录> --line-map <映射.json> --kandian "<缓存目录>|21" --pages 21-30 --out <检查目录>
-```
+## 文档
 
-页级映射需要正文已有 `<!--pdf-page.N-->` 物理页锚点。逐行映射、AI 核图和安全纠错见 [quality-and-location.md](references/quality-and-location.md)。服务凭据与额度见各接口参考；缓存检查不联网，不创建定期任务。
+- [SKILL.md](SKILL.md)：入口。范围与分流、主流程、保真规则、页码口径、书目录约定。
+- 分支：[A 现代出版物](references/modern-publications.md)、[B 非现代排印古籍](references/historical-editions.md)。
+- 共用步骤：[目录与多级标题](references/toc-headings.md)、[疑字核对](references/doubt-check.md)、[结构核查](references/structure-audit.md)。
+- 接口：[MinerU](references/mineru-api.md)、[PaddleOCR-VL](references/vl.md)、[看典与古籍酷](references/guji-apis.md)。
 
-## 保真与验证边界
+## 测试与边界
 
-改字须有原图依据；原刊误印默认照录，另记疑问。原书无标点不补标点。校注和正文分开，脚本生成改动报告。页码、候选结构、已核事实与未知项明确区分。原 PDF、原始结果和用户标注不擅自删除或覆盖。
+`python -X utf8 -m pytest` 运行脚本测试，不调用外部服务。
 
-已有论文、现代专著和现代竖排古籍的试跑记录；印刷影印页、手写影印页只有小样本，不能外推成全书准确率或所有古籍适用性。高质量交付按所选分支和本次范围验收，不能把接口成功等同于校订完成。
+已有论文、现代专著和现代竖排古籍的试跑记录；印刷影印页、手写影印页只有小样本，不能外推成全书准确率或适用于所有古籍。
 
-脚本测试使用 pytest，不调用外部服务。实验性的通用结构适配原型已留在项目研究目录，不作为当前安装 skill 的依赖或默认流程。
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

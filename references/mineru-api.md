@@ -1,5 +1,7 @@
 # MinerU 精准解析 API
 
+MinerU 在两条工作流里的角色见 [SKILL.md](../SKILL.md)「识别来源各管什么」；产物文件怎么用见 [mineru-outputs.md](mineru-outputs.md)。
+
 官方文档：<https://mineru.net/apiManage/docs>
 
 ## 适用范围
@@ -16,8 +18,8 @@
 
 用户后台额度不同可重新配置：
 
-```bash
-python scripts/mineru_api.py configure --daily-file-quota 8000 --priority-page-quota 1500
+```powershell
+python -X utf8 <skill>/scripts/mineru_api.py configure --daily-file-quota 8000 --priority-page-quota 1500
 ```
 
 ## 认证
@@ -36,7 +38,7 @@ Authorization: Bearer <token>
 
 ## 本地文件流程
 
-提交前使用 `scripts/pdf_preflight.py` 作本地预检并对照异常页原图。客户端的 `auto` 仅依据少量抽样页的文字量，不能判断文字层准确性。存在文字层但质量较差时先建议、等用户选择是否重做；用户已明确要求的 OCR 路线不重复询问。决定后显式传 `--ocr on/off`。
+提交前使用 `pdf_preflight.py` 作本地预检并对照异常页原图。客户端的 `auto` 仅依据少量抽样页的文字量，不能判断文字层准确性。存在文字层但质量较差时先建议、等用户选择是否重做；用户已明确要求的 OCR 路线不重复询问。决定后显式传 `--ocr on/off`。
 
 1. `POST /api/v4/file-urls/batch`：提交文件名、`data_id`、`is_ocr` 与模型配置，取得 `batch_id` 和顺序对应的 `file_urls`。
 2. 对每个预签名 URL 执行 `PUT`，只发送文件字节和 `Content-Length`，不要设置额外的 `Content-Type`。
@@ -57,18 +59,18 @@ Authorization: Bearer <token>
 
 ## 命令
 
-```bash
+```powershell
 # 首次配置
-python scripts/mineru_api.py configure
+python -X utf8 <skill>/scripts/mineru_api.py configure
 
 # 提交、等待、下载并解压
-python scripts/mineru_api.py submit book.pdf -o MinerU
+python -X utf8 <skill>/scripts/mineru_api.py submit <书>/<原件>.pdf -o <书>/_数据/MinerU
 
 # 中断后继续已有任务
-python scripts/mineru_api.py resume <batch_id>
+python -X utf8 <skill>/scripts/mineru_api.py resume <batch_id>
 
 # 查看本机当天记录的估算用量
-python scripts/mineru_api.py usage
+python -X utf8 <skill>/scripts/mineru_api.py usage
 ```
 
 `submit` 默认等待 6 小时，轮询间隔 5 秒；可用 `--timeout` 和 `--poll-interval` 调整。任务创建后会在用户配置目录的 `jobs/` 保存恢复信息。

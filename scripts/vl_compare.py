@@ -3,7 +3,7 @@
 --vl-dir、--kandian、--mineru 三选一，与材料横竖排或工作流归属无强绑定。
 默认从本书 config.json 读取字形表，--variant 显式覆盖；--pages 限定请求范围。
 CLI 验证映射中的正文哈希，缺少哈希或版本过期均须重新生成映射。
-疑字中的 minerU 是兼容字段，表示正文现字；ocr 表示 reader 指定的第二读者。
+疑字中的 current 表示正文现字（旧版字段名 minerU）；ocr 表示 reader 指定的第二读者。
 每条保存 sourceHash、UTF-16 偏移和页/行位置，供后续版本校验和裁图。
 分歧只是线索，不直接判错或改文；大段分歧另列，缺页返回退出码2。
 """
@@ -163,7 +163,7 @@ def compare(files: list[Path], line_map: dict, reader: dict[int, str] | Path, ta
                 continue
             mine, theirs = a[i1:i2], b[j1:j2]
             if len(mine) > SMALL or len(theirs) > SMALL:
-                large.append({"pdfPage": page, "minerU": mine, "ocr": theirs})
+                large.append({"pdfPage": page, "current": mine, "ocr": theirs})
                 continue
             anchor = ours[i1] if i1 < len(ours) else ours[-1]
             number = anchor[1]
@@ -172,12 +172,12 @@ def compare(files: list[Path], line_map: dict, reader: dict[int, str] | Path, ta
             data = raw16[number]
             if VISIBLE_STRIP.search(data[start * 2:end * 2].decode("utf-16-le")):
                 # 分歧跨过注号、标签、页码锚点：照偏移整段替换会把它们一起删掉，交人看
-                large.append({"pdfPage": page, "minerU": mine, "ocr": theirs})
+                large.append({"pdfPage": page, "current": mine, "ocr": theirs})
                 continue
             doubts.append({
                 "file": files[number].name, "from": start, "to": end, "pdfPage": page,
                 "page": printed_page(texts[number], start),
-                "minerU": data[start * 2:end * 2].decode("utf-16-le"), "ocr": theirs,
+                "current": data[start * 2:end * 2].decode("utf-16-le"), "ocr": theirs,
                 "context": context(data, start, end),
                 "rect": anchor[4], "writingMode": line_map.get("writingMode", "horizontal-tb"),
                 "reader": reader_name, "sourceHash": text_hash(texts[number]),
@@ -249,17 +249,17 @@ def main() -> int:
              f"分歧只是线索：{name} 也会读错、会把原书异体写成通行字形，判定一律看原图。", "",
              f"## 疑字（{len(doubts)} 处，一处不超过 {SMALL} 字）", "",
              f"| # | 物理页 | 正文 | {name} | 上下文 |", "|---|---|---|---|---|"]
-    lines += [f"| {d['n']} | {d['pdfPage']} | {d['minerU'] or '（无）'} | {d['ocr'] or '（无）'} | {d['context']} |"
+    lines += [f"| {d['n']} | {d['pdfPage']} | {d['current'] or '（无）'} | {d['ocr'] or '（无）'} | {d['context']} |"
               for d in doubts]
     invented = []
     if args.mineru:
         # 正文里有、MinerU 同页一个字都对不上的成段文字：VL 在空白、透印处编造的典型样子
-        invented = [r for r in large if len(r["minerU"]) >= 8 and not r["ocr"]]
+        invented = [r for r in large if len(r["current"]) >= 8 and not r["ocr"]]
         large = [r for r in large if r not in invented]
         lines += ["", f"## 疑似 VL 编造（{len(invented)} 处）：正文有、MinerU 同页没有的成段文字", "",
                   "逐条看原图：原书没有就删，写进交付报告；是 MinerU 漏读就保留。", "",
                   "| 物理页 | 正文 |", "|---|---|"]
-        lines += [f"| {r['pdfPage']} | {r['minerU'][:60]} |" for r in invented]
+        lines += [f"| {r['pdfPage']} | {r['current'][:60]} |" for r in invented]
         ours, punct_rows = page_punct(files, line_map), []
         pages_with_text = set(ours)
         for page in sorted(reader):
@@ -284,7 +284,7 @@ def main() -> int:
                   "| 物理页 | 多出 |", "|---|---|"]
         lines += [f"| {p} | {'、'.join(f'{m}×{n}' for m, n in more.items())} |" for p, more in punct_rows]
     lines += ["", f"## 大段差异（{len(large)} 处，交结构核查）", "", f"| 物理页 | 正文 | {name} |", "|---|---|---|"]
-    lines += [f"| {r['pdfPage']} | {r['minerU'][:40] or '（无）'} | {r['ocr'][:40] or '（无）'} |" for r in large]
+    lines += [f"| {r['pdfPage']} | {r['current'][:40] or '（无）'} | {r['ocr'][:40] or '（无）'} |" for r in large]
     (out / "_vl_compare.md").write_text("\n".join(lines) + "\n", encoding="utf-8", errors="strict")
     print(f"VL_COMPARE reader={name} pages={compared} doubts={len(doubts)} large={len(large)} invented={len(invented)} missing={len(missing)}")
     return 0 if coverage["complete"] else 2

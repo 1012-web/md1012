@@ -101,7 +101,7 @@ def test_book_forms_uses_first_of_each_group(tmp_path):
 
 
 def test_decide_follows_rules():
-    base = {"ocr": "二", "minerU": "一"}
+    base = {"ocr": "二", "current": "一"}
     assert AD.decide({**base, "verdict": "B", "confidence": "高"}, "一", "keep") == ("change", "二")
     assert AD.decide({**base, "verdict": "B", "confidence": "低"}, "一", "keep") == ("pending", None)
     assert AD.decide({**base, "verdict": "A", "confidence": "高", "misprint": "戍"}, "一", "keep") == ("misprint", None)

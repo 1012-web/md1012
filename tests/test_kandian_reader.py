@@ -78,7 +78,7 @@ def test_cli_produces_compatible_doubt_offsets_and_missing_page_report(tmp_path)
     doubts = json.loads((out / "doubts.json").read_text(encoding="utf-8", errors="strict"))
     assert len(doubts) == 1
     doubt = doubts[0]
-    assert doubt["minerU"] == "事" and doubt["ocr"] == ""
+    assert doubt["current"] == "事" and doubt["ocr"] == ""
     assert body[doubt["from"]:doubt["to"]] == "事"
     assert doubt["pdfPage"] == 21 and doubt["writingMode"] == "vertical-rl"
     coverage = json.loads((out / "_reader_coverage.json").read_text(encoding="utf-8", errors="strict"))

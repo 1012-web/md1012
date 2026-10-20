@@ -13,7 +13,7 @@ import json
 import shutil
 from pathlib import Path
 
-from content_state import book_file, read_json, read_text, text_hash, write_json, write_text
+from content_state import body_reading, book_file, read_json, read_text, text_hash, write_json, write_text
 
 
 def load_judgements(folder: Path) -> dict[int, dict]:
@@ -123,7 +123,7 @@ def main() -> None:
         if n in skip or m["file"] in args.skip_file:
             report["skipped"].append(row)
             continue
-        where, new = decide(j, m["minerU"], args.variants)
+        where, new = decide(j, body_reading(m), args.variants)
         applied = state["files"][m["file"]]["applied"].get(str(n))
         if applied:
             if where != "change" or new != applied["new"]:
@@ -133,7 +133,7 @@ def main() -> None:
         if where != "change":
             report["verified" if where == "verify" else where].append(row)
             continue
-        edits[m["file"]].append((m["from"], m["to"], m["minerU"], new, n))
+        edits[m["file"]].append((m["from"], m["to"], body_reading(m), new, n))
     backup = args.dir / "backup"
     backup.mkdir(exist_ok=True)
     plans = {}

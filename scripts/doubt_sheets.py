@@ -11,7 +11,7 @@ import json
 import textwrap
 from pathlib import Path
 
-from content_state import book_file, read_json, read_text, text_hash, write_json
+from content_state import body_reading, book_file, read_json, read_text, text_hash, upgrade_legacy, write_json
 
 PER_SHEET = 5
 
@@ -56,7 +56,7 @@ def font_of(size: int):
 def caption(item: dict) -> list[str]:
     context = item["context"].replace("**", "【", 1).replace("**", "】", 1)
     return [f"#{item['n']}  {item['page']}  PDF 第 {item['pdfPage']} 页",
-            f"正文「{item['minerU'] or '（无）'}」  {item.get('reader', '第二读者')}「{item['ocr'] or '（无）'}」",
+            f"正文「{body_reading(item) or '（无）'}」  {item.get('reader', '第二读者')}「{item['ocr'] or '（无）'}」",
             *textwrap.wrap(context, 26)]
 
 
@@ -114,7 +114,7 @@ def stack(tiles: list, title: str | None, font):
 def crops(pdf: Path, doubts_path: Path, out: Path, book: Path | None = None) -> None:
     import pymupdf
 
-    items = read_json(doubts_path)
+    items = [upgrade_legacy(item) for item in read_json(doubts_path)]
     if book is not None:
         for item in items:
             source = book_file(book, item["file"])

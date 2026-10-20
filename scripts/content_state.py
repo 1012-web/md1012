@@ -25,6 +25,18 @@ def write_text(path: Path, text: str) -> None:
     temp.replace(path)
 
 
+def body_reading(item: dict) -> str:
+    """疑字条目的正文现字。2026-10-20 前的清单与判定用旧字段名 minerU，照旧接受。"""
+    return item["current"] if "current" in item else item["minerU"]
+
+
+def upgrade_legacy(item: dict) -> dict:
+    """把旧字段名 minerU 就地改成 current。"""
+    if "current" not in item and "minerU" in item:
+        item["current"] = item.pop("minerU")
+    return item
+
+
 def read_json(path: Path):
     return json.loads(read_text(path))
 

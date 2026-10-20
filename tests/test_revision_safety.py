@@ -29,7 +29,7 @@ def correction_fixture(root):
     folder.mkdir()
     original = body.read_text(encoding="utf-8", errors="strict")
     manifest = [dict(n=n, file="body.md", sourceHash=text_hash(original), reader="Kandian",
-                     pdfPage=1, page="p.1", context="甲乙", minerU="", **{"from": pos, "to": pos})
+                     pdfPage=1, page="p.1", context="甲乙", current="", **{"from": pos, "to": pos})
                 for n, pos in [(1, 1), (2, 0)]]
     judged = [dict(n=1, verdict="C", confidence="高", ocr="丙", correct="丙", reason="核图"),
               dict(n=2, verdict="C", confidence="低", ocr="丁", correct="丁", reason="待核")]
@@ -116,7 +116,7 @@ def test_reader_caption_and_stale_crop_checks(tmp_path):
     body = tmp_path / "body.md"
     body.write_text("甲", encoding="utf-8", errors="strict")
     item = dict(n=1, file="body.md", sourceHash=text_hash("乙"), reader="Kandian",
-                pdfPage=1, page="p.1", rect=None, minerU="甲", ocr="乙", context="**甲**")
+                pdfPage=1, page="p.1", rect=None, current="甲", ocr="乙", context="**甲**")
     assert "Kandian" in caption(item)[1] and "VL" not in caption(item)[1]
     doubts = tmp_path / "doubts.json"
     save(doubts, [item])

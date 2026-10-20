@@ -9,7 +9,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "merge_judgement.py"
 
 
 def item(n: int, verdict: str = "A", confidence: str = "高", **extra) -> dict:
-    return {"n": n, "page": f"p.{n}", "minerU": "人", "ocr": "入", "verdict": verdict,
+    return {"n": n, "page": f"p.{n}", "current": "人", "ocr": "入", "verdict": verdict,
             "confidence": confidence, "reason": "看图", **extra}
 
 
@@ -64,3 +64,13 @@ def test_empty_correct_means_delete_and_is_accepted(tmp_path: Path) -> None:
     result = run(tmp_path)
     assert result.returncode == 1
     assert "#2 判 C 却没写 correct" in result.stdout and "#1" not in result.stdout
+
+
+def test_legacy_miner_u_field_is_still_accepted(tmp_path: Path) -> None:
+    # 2026-10-20 前的判定文件用 minerU 记正文现字；合并时改名为 current
+    legacy = {k: v for k, v in item(1, "B").items() if k != "current"} | {"minerU": "人"}
+    setup(tmp_path, {1: [legacy]}, 1)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    merged = json.loads((tmp_path / "judgement.json").read_text("utf-8"))
+    assert merged[0]["current"] == "人" and "minerU" not in merged[0]
