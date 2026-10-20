@@ -23,7 +23,7 @@
 
 把本仓库放进 Claude Code 的 skills 目录（或用 skill 管理工具链接过去）。在 Claude Code 里给出 PDF 或已有的识别结果并说明需求，skill 会自动触发。
 
-脚本需要 Python 3（在 3.13 上测试），以及 `pymupdf`、`pypdf`、`Pillow`、`numpy`、`PyYAML`。
+脚本需要最新版 Python 3，以及 `pymupdf`、`pypdf`、`Pillow`、`numpy`、`PyYAML`。
 
 ## 文档
 
