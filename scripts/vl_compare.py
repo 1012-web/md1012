@@ -1,30 +1,11 @@
-"""正文与第二位读者的读法逐页比对，列出汉字分歧，作疑字来源（交 AI 看原图或用户判）。
+"""将正文与所选第二读者逐页比对，产生核图线索。
 
-两条路线各有一位第二读者：
-  横排书：底稿是 MinerU，第二读者是 PaddleOCR-VL（--vl-dir）。
-  竖排书：底稿是 VL，第二读者是 MinerU vlm 后端（--mineru <输出目录>|<起始物理页>，拆卷的每卷一个）。
-    MinerU 竖排认字比 VL 差，但实测不凭空编造（《黄道周集》10 页 VL 有 4 页编造、MinerU 0 页），
-    所以竖排书另出两份线索：成品里有、MinerU 同页完全没有的大段文字（疑似 VL 编造）；
-    MinerU 读出的引号、顿号比成品多的页（VL 常漏后引号、删书名号之间的顿号，看原图补）。
-正文每个字在哪一页、哪一行，取自逐行映射（line_map.py 的 line-map.json）；VL 一页的文字取逐页结果
-（paddle_api.py 存的 pNNNN.json，页眉页脚页码图表公式除外），MinerU 一页取 layout.json 的正文块与页下注。
-两边都只比汉字与字母数字：NFKC、
-按本书字形表把异体折成原书字形（--variant 黄黃 说說，第一个是原书字形）、VL 那边先去掉注号（〔一〕（二）之类）。
-
-分歧分两档：
-  - 疑字（doubts.json）：一处只差一到四个字，最该看原图。每条记 n、file、from/to（UTF-16 偏移；
-    VL 多出而正文没有的「疑漏字」from=to）、pdfPage、page（印刷页，按前面最近的页码锚点）、
-    minerU（正文现在的字）、ocr（VL 读的字）、context（前后文，疑字用 ** 标出）、rect（所在行的框，
-    逐页退路的为 null）、writingMode。doubt_sheets.py crops 读它截图。
-  - 大段差异：五个字以上，多是整块漏读、注与正文错位，交结构核查，不进疑字。
-VL 按上下文写字，会把原书异体、原书误印「改对」，所以分歧只是线索：判定一律看原图，不许拿 VL 的读法直接改正文。
-
-用法：
-  python -X utf8 vl_compare.py --book <书文件夹> --line-map <书>/_数据/逐行映射/line-map.json \
-      --vl-dir <书>/_数据/VL [--variant 黄黃 --variant 说說] [--out <书>/_数据/疑字判定]
-  # 竖排书
-  python -X utf8 vl_compare.py --book <书> --line-map … --mineru "<书>/_数据/MinerU原始/<卷>|1" [--mineru "<卷2>|201"] …
-stdout 只打一行 ASCII；报告写 <out>/_vl_compare.md。
+--vl-dir、--kandian、--mineru 三选一，与材料横竖排或工作流归属无强绑定。
+默认从本书 config.json 读取字形表，--variant 显式覆盖；--pages 限定请求范围。
+CLI 验证映射中的正文哈希，缺少哈希或版本过期均须重新生成映射。
+疑字中的 minerU 是兼容字段，表示正文现字；ocr 表示 reader 指定的第二读者。
+每条保存 sourceHash、UTF-16 偏移和页/行位置，供后续版本校验和裁图。
+分歧只是线索，不直接判错或改文；大段分歧另列，缺页返回退出码2。
 """
 from __future__ import annotations
 
@@ -41,6 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from line_map import ANCHOR, VISIBLE_STRIP, comparable, markdown_streams, utf16_offsets  # noqa: E402
 from vl_common import SKIP_LABELS  # noqa: E402
+from kandian_reader import kandian_reader  # noqa: E402
+from content_state import book_file, page_selection, text_hash, validate_mapping  # noqa: E402
 
 # 注号：VL 常把〔一〕写成（一）、「一〕」（丢了开口）甚至《三》，都当注号去掉；要求有收口，「卷二十三」不受影响
 MARKER_RE = re.compile(r"[〔（(《]?\s*[一二三四五六七八九十〇0-9]{1,3}\s*[〕）)》]")
@@ -81,7 +64,7 @@ def marker_spans(text: str) -> list[tuple[int, int]]:
 
 
 def vl_page(path: Path) -> str:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8", errors="strict"))
     return "".join((b.get("block_content") or "") for b in data.get("parsing_res_list", [])
                    if (b.get("block_label") or "") not in SKIP_LABELS)
 
@@ -157,14 +140,18 @@ def context(text16: bytes, start: int, end: int, size: int = 12) -> str:
     return before + "**" + visible(text16, start, end) + "**" + after
 
 
-def compare(files: list[Path], line_map: dict, reader: dict[int, str] | Path, table: dict[str, str]):
+def compare(files: list[Path], line_map: dict, reader: dict[int, str] | Path, table: dict[str, str],
+            selected: set[int] | None = None, reader_name: str = "second-reader"):
+    validate_mapping(files, line_map, require_hash=False)
     if isinstance(reader, Path):  # 老写法：直接给 VL 逐页目录
         reader = vl_reader(reader)
-    texts = [path.read_text(encoding="utf-8") for path in files]
+    texts = [path.read_text(encoding="utf-8", errors="strict") for path in files]
     raw16 = [text.encode("utf-16-le") for text in texts]
     pages = markdown_pages(files, line_map, table)
     doubts, large, compared = [], [], 0
     for page in sorted(pages):
+        if selected is not None and page not in selected:
+            continue
         if page not in reader:
             continue
         compared += 1
@@ -193,6 +180,7 @@ def compare(files: list[Path], line_map: dict, reader: dict[int, str] | Path, ta
                 "minerU": data[start * 2:end * 2].decode("utf-16-le"), "ocr": theirs,
                 "context": context(data, start, end),
                 "rect": anchor[4], "writingMode": line_map.get("writingMode", "horizontal-tb"),
+                "reader": reader_name, "sourceHash": text_hash(texts[number]),
             })
     for n, item in enumerate(doubts, start=1):
         item["n"] = n
@@ -203,7 +191,7 @@ def page_punct(files: list[Path], line_map: dict) -> dict[int, dict[str, int]]:
     """成品每个物理页上的引号、顿号个数（按逐行映射把正文切到页）。"""
     counts: dict[int, dict[str, int]] = defaultdict(lambda: dict.fromkeys(PUNCT_WATCH, 0))
     for path in files:
-        raw16 = path.read_text(encoding="utf-8").encode("utf-16-le")
+        raw16 = path.read_text(encoding="utf-8", errors="strict").encode("utf-16-le")
         for entry in line_map["files"].get(path.name, {}).get("lines", []):
             piece = raw16[entry["from"] * 2:entry["to"] * 2].decode("utf-16-le", "ignore")
             for mark in PUNCT_WATCH:
@@ -211,28 +199,52 @@ def page_punct(files: list[Path], line_map: dict) -> dict[int, dict[str, int]]:
     return counts
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--book", type=Path, required=True, help="书文件夹（Markdown 在顶层）")
     parser.add_argument("--line-map", type=Path, required=True)
-    parser.add_argument("--vl-dir", type=Path, help="横排书：VL 逐页结果当第二读者")
-    parser.add_argument("--mineru", action="append", default=[],
+    readers = parser.add_mutually_exclusive_group(required=True)
+    readers.add_argument("--kandian", action="append", default=[],
+                         help="看典逐页结果：目录|起始物理页；默认 1，可重复指定分卷")
+    readers.add_argument("--vl-dir", type=Path, help="横排书：VL 逐页结果当第二读者")
+    readers.add_argument("--mineru", action="append", default=[],
                         help="竖排书：MinerU 输出目录当第二读者，写成 目录|起始物理页；拆卷的每卷一个")
     parser.add_argument("--variant", action="append", default=[], help="本书字形表的一组，原书字形在前，如 黄黃")
+    parser.add_argument("--config", type=Path, help="书配置，默认 <书>/_数据/config.json；--variant 显式覆盖配置字形表")
+    parser.add_argument("--pages", help="仅比较这些原 PDF 物理页，如 21-30 或 3,7,12-15")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    if bool(args.vl_dir) == bool(args.mineru):
-        parser.error("第二读者给一个：横排书 --vl-dir，竖排书 --mineru")
-    line_map = json.loads(args.line_map.read_text(encoding="utf-8"))
-    files = [args.book / name for name in line_map["files"]]
-    table = variant_table(args.variant)
-    reader = vl_reader(args.vl_dir) if args.vl_dir else mineru_reader(args.mineru)
-    name = "VL" if args.vl_dir else "MinerU"
-    doubts, large, compared = compare(files, line_map, reader, table)
+    line_map = json.loads(args.line_map.read_text(encoding="utf-8", errors="strict"))
+    try:
+        files = [book_file(args.book, name) for name in line_map["files"]]
+        validate_mapping(files, line_map)
+        selected = page_selection(args.pages)
+        config_path = args.config or args.book / "_数据" / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8", errors="strict")) if config_path.exists() else {}
+        groups = args.variant if args.variant else config.get("variantEquivalents", [])
+        table = variant_table(groups)
+        reader = (kandian_reader(args.kandian) if args.kandian else
+                  vl_reader(args.vl_dir) if args.vl_dir else mineru_reader(args.mineru))
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    name = "Kandian" if args.kandian else "VL" if args.vl_dir else "MinerU"
+    mapped = set(markdown_pages(files, line_map, table))
+    scope = selected if selected is not None else mapped
+    missing = sorted(scope - set(reader))
+    unmapped = sorted(scope - mapped)
+    reader = {p: text for p, text in reader.items() if p in scope}
+    doubts, large, compared = compare(files, line_map, reader, table, selected=scope, reader_name=name)
     out = args.out or args.book / "_数据" / "疑字判定"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "doubts.json").write_text(json.dumps(doubts, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "doubts.json").write_text(json.dumps(doubts, ensure_ascii=False, indent=1), encoding="utf-8", errors="strict")
+    coverage = {"reader": name, "compared_pages": compared, "missing_physical_pages": missing,
+                "requested_physical_pages": sorted(scope), "unmapped_requested_pages": unmapped,
+                "complete": not missing and not unmapped, "variant_groups": groups}
+    (out / "_reader_coverage.json").write_text(json.dumps(coverage, ensure_ascii=False, indent=2), encoding="utf-8", errors="strict")
     lines = [f"# 正文与 {name} 读法比对", "",
+             f"本次请求物理页：{','.join(map(str, sorted(scope)))}。",
+             f"第二读者未覆盖的物理页：{','.join(map(str, missing)) or '无'}。",
+             f"底稿未映射的请求页：{','.join(map(str, unmapped)) or '无'}。未覆盖的页不算核对完成。", "",
              f"比了 {compared} 页。异体按本书字形表折叠（{len(table)} 个异体字），注号去掉，标点不比。",
              f"分歧只是线索：{name} 也会读错、会把原书异体写成通行字形，判定一律看原图。", "",
              f"## 疑字（{len(doubts)} 处，一处不超过 {SMALL} 字）", "",
@@ -240,7 +252,7 @@ def main() -> None:
     lines += [f"| {d['n']} | {d['pdfPage']} | {d['minerU'] or '（无）'} | {d['ocr'] or '（无）'} | {d['context']} |"
               for d in doubts]
     invented = []
-    if not args.vl_dir:
+    if args.mineru:
         # 正文里有、MinerU 同页一个字都对不上的成段文字：VL 在空白、透印处编造的典型样子
         invented = [r for r in large if len(r["minerU"]) >= 8 and not r["ocr"]]
         large = [r for r in large if r not in invented]
@@ -259,11 +271,24 @@ def main() -> None:
                   "VL 常漏后引号、删掉书名号之间的顿号。逐页看原图补；MinerU 也会多读，不照它改。", "",
                   "| 物理页 | 多出 |", "|---|---|"]
         lines += [f"| {p} | {'、'.join(f'{m}×{n}' for m, n in more.items())} |" for p, more in punct_rows]
+    if args.kandian:
+        ours, punct_rows = page_punct(files, line_map), []
+        for page in sorted(set(reader) & set(ours)):
+            text = unicodedata.normalize("NFKC", reader[page])
+            more = {mark: text.count(mark) - ours[page][mark] for mark in PUNCT_WATCH
+                    if text.count(mark) > ours[page][mark]}
+            if more:
+                punct_rows.append((page, more))
+        lines += ["", f"## 补标点线索（{len(punct_rows)} 页）：看典读出的后引号、顿号比正文多", "",
+                  "只作核图线索；看典也会漏标点、倒读条目号，不能据此自动改文。", "",
+                  "| 物理页 | 多出 |", "|---|---|"]
+        lines += [f"| {p} | {'、'.join(f'{m}×{n}' for m, n in more.items())} |" for p, more in punct_rows]
     lines += ["", f"## 大段差异（{len(large)} 处，交结构核查）", "", f"| 物理页 | 正文 | {name} |", "|---|---|---|"]
     lines += [f"| {r['pdfPage']} | {r['minerU'][:40] or '（无）'} | {r['ocr'][:40] or '（无）'} |" for r in large]
-    (out / "_vl_compare.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"VL_COMPARE reader={name} pages={compared} doubts={len(doubts)} large={len(large)} invented={len(invented)}")
+    (out / "_vl_compare.md").write_text("\n".join(lines) + "\n", encoding="utf-8", errors="strict")
+    print(f"VL_COMPARE reader={name} pages={compared} doubts={len(doubts)} large={len(large)} invented={len(invented)} missing={len(missing)}")
+    return 0 if coverage["complete"] else 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

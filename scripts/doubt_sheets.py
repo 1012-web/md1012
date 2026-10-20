@@ -1,16 +1,8 @@
-"""按逐行映射截疑字所在的整行（竖排是整列）原图、拼图，交子代理判定或在对话里给用户看。
+"""从原 PDF 裁疑字所在整行/整列或整页，生成核图拼图。
 
-疑字清单来自 vl_compare.py 的 doubts.json（底稿与 VL 读法不同的地方）。逐行映射只知道字在哪一行、
-不知道在行里的哪一格，所以截整行、不画红线：每张小图旁边写编号、页码和前后文（疑字用【】标出），
-判定的人对着前后文在行里找到那个字。逐页退路的疑字没有行框，截整页。
-
-  crops  每条截一张图，每 5 条拼一张 sheet-N.png，写 manifest.json（doubts.json 各字段，加 line（截图文件名））。
-         交子代理判定，结果 judgement-bK.json 格式见 references/judging-prompt.md。
-  owner  把要用户拍板的几组编号拼成带说明的图（发在对话里给用户看）：--groups 是 JSON {"组名": [编号, ...], ...}。
-
-用法：
-  python -X utf8 doubt_sheets.py crops --pdf 书.pdf --doubts <书>/_数据/疑字判定/doubts.json --out <书>/_数据/疑字判定
-  python -X utf8 doubt_sheets.py owner --dir <书>/_数据/疑字判定 --groups groups.json
+CLI 的 crops 必须给 --book 校验正文 sourceHash，过期疑字拒绝裁图。
+reader 显示实际第二读者，未提供时只称第二读者，不假定为 VL。
+页级映射没有行框时截整页；输出保留 sourceHash、reader 和原始偏移。
 """
 from __future__ import annotations
 
@@ -18,6 +10,8 @@ import argparse
 import json
 import textwrap
 from pathlib import Path
+
+from content_state import book_file, read_json, read_text, text_hash, write_json
 
 PER_SHEET = 5
 
@@ -62,7 +56,7 @@ def font_of(size: int):
 def caption(item: dict) -> list[str]:
     context = item["context"].replace("**", "【", 1).replace("**", "】", 1)
     return [f"#{item['n']}  {item['page']}  PDF 第 {item['pdfPage']} 页",
-            f"正文「{item['minerU'] or '（无）'}」  VL「{item['ocr'] or '（无）'}」",
+            f"正文「{item['minerU'] or '（无）'}」  {item.get('reader', '第二读者')}「{item['ocr'] or '（无）'}」",
             *textwrap.wrap(context, 26)]
 
 
@@ -75,7 +69,8 @@ def tile(folder: Path, item: dict, font):
     step = font.size + 8
     if is_column(item):
         image = image.resize((max(1, int(image.width * 640 / image.height)), 640))
-        canvas = Image.new("RGB", (image.width + 420, max(image.height, step * len(text)) + 20), "white")
+        pane_width = max(420, int(max(font.getlength(row) for row in text)) + 35)
+        canvas = Image.new("RGB", (image.width + pane_width, max(image.height, step * len(text)) + 20), "white")
         canvas.paste(image, (10, 10))
         draw = ImageDraw.Draw(canvas)
         for i, row in enumerate(text):
@@ -116,10 +111,15 @@ def stack(tiles: list, title: str | None, font):
     return sheet
 
 
-def crops(pdf: Path, doubts_path: Path, out: Path) -> None:
+def crops(pdf: Path, doubts_path: Path, out: Path, book: Path | None = None) -> None:
     import pymupdf
 
-    items = json.loads(doubts_path.read_text(encoding="utf-8"))
+    items = read_json(doubts_path)
+    if book is not None:
+        for item in items:
+            source = book_file(book, item["file"])
+            if not item.get("sourceHash") or text_hash(read_text(source)) != item["sourceHash"]:
+                raise ValueError(f"Stale or unversioned doubts for {item['file']}; regenerate comparison")
     out.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open(pdf)
     for item in items:
@@ -129,13 +129,13 @@ def crops(pdf: Path, doubts_path: Path, out: Path) -> None:
     for start in range(0, len(items), PER_SHEET):
         group = items[start:start + PER_SHEET]
         stack([tile(out, it, font) for it in group], None, font).save(out / f"sheet-{start // PER_SHEET + 1}.png")
-    (out / "manifest.json").write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_json(out / "manifest.json", items)
     print(f"DOUBT_SHEETS items={len(items)} sheets={(len(items) + PER_SHEET - 1) // PER_SHEET}")
 
 
 def owner(folder: Path, groups_path: Path) -> None:
-    manifest = {m["n"]: m for m in json.loads((folder / "manifest.json").read_text(encoding="utf-8"))}
-    groups = json.loads(groups_path.read_text(encoding="utf-8"))
+    manifest = {m["n"]: m for m in read_json(folder / "manifest.json")}
+    groups = read_json(groups_path)
     out = folder / "用户拍板"
     out.mkdir(exist_ok=True)
     font = font_of(22)
@@ -156,12 +156,13 @@ def main() -> None:
     c.add_argument("--pdf", type=Path, required=True)
     c.add_argument("--doubts", type=Path, required=True)
     c.add_argument("--out", type=Path, required=True)
+    c.add_argument("--book", type=Path, required=True, help="校验疑字对应的正文版本，拒绝过期位置")
     o = sub.add_parser("owner")
     o.add_argument("--dir", type=Path, required=True)
     o.add_argument("--groups", type=Path, required=True)
     args = parser.parse_args()
     if args.action == "crops":
-        crops(args.pdf, args.doubts, args.out)
+        crops(args.pdf, args.doubts, args.out, args.book)
     else:
         owner(args.dir, args.groups)
 

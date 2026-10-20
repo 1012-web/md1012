@@ -1,29 +1,13 @@
-"""以 PaddleOCR-VL 的逐页结果为底稿整理 Markdown（MinerU 在这本书上明显不行时用，如竖排排印本）。
+"""从已保存的 VL 逐页结果生成可核图的按页 Markdown 草稿。
 
-两步：
-  pages  推断每页的印刷页码，写报告（VL 读页码噪声大，插页又会让偏移量中途变化，所以不能直接用）：
-         能解析的页码只有与前后页偏移一致才采信；两个可信页偏移相同，中间的页按它补齐；
-         偏移变了的地方就是插页，报告里列出，供定分段与书配置的页码偏移。
-  build  按 --segment 把页分成几个文件（如 目录、前言、正文各一个），整理成 Markdown：
-         页码锚点 <!--p.N-->（印刷页；有页码的段里推不出的页按前段偏移推，标 <!--?page-guess-->）；
-         标题层级按 references/vl.md「标题层级」（VL 的标签只是线索，主要看位置、长短、有无句读）；
-         页下注以页面图上的**分隔线**为准：线那一侧至少一块以〔一〕（一）开头，线那一侧的块才都算注
-         （以注号开头的 footer 块也算）；同页注号换成 [^n]，找不到引用位置的留 <!--?fnref n--> 待人工放；
-         上一页末段没有句末标点就与下一页首段接上（以条目号开头的段不接）；本书字形表改回原书字形；
-         页眉、书口、页码不收，逐页变化的书眉（「明通鑑卷N 紀N …年（公元） 页码」）按前缀认出删去、记进报告；
-         图、表从原 PDF 裁出嵌入。□（原书缺字）照录。
-         --item-numbers：编年体点校本的条首阿拉伯条目号套 <sup class="item">（按书开关，报告会提示）。
+build 默认保守整理：保留可疑文字和未核分类，不自动改卷号。
+每页始终标 <!--pdf-page.N-->；没有已核印刷页报告时不猜印刷页。
+目录标题层级由 AI 看目录原页并核正文，见 references/toc-headings.md。
+原有高级版面启发式仅在显式 --legacy-heuristics 时启用。
 
-VL 会按上下文「规范化」，本脚本只做结构整理与字形表替换，字句不猜。它做的机械改动（拦下的编造块、删掉的
-书眉与书口、字形表替换）记进报告；之后的一切改动由 diff_report.py --before <本脚本输出> <成品> 报出。
-字句的第二位读者见 second_reader.py；结构问题交结构核查（structure_audit.py）。
-
-用法：
-  python -X utf8 vl_build.py pages --vl-dir <书>/_数据/VL --pages 1-497 --report <书>/_数据/过程报告/_vl_pages.json
-  python -X utf8 vl_build.py build --vl-dir <书>/_数据/VL --pages-report <上一步报告> \
-      --segment 1-16:00-目录.md --segment 17-98:01-前言.md --segment 99-497:02-正文.md \
-      --variant-equivalent 黄黃 ... --writing-mode vertical-rl --out-dir <书>/_数据/过程报告/vl稿 [--title 书名]
-stdout 只打一行 ASCII；报告写 UTF-8 JSON。
+pages 子命令输出页码分析候选；不是人工核验结果，不能直接冒充原页码。
+原始 JSON、原页码识别值、起稿日志与后续 diff_report 都应保留。
+字词核对使用 vl_compare.py，不直接根据另一家读法改字。
 """
 from __future__ import annotations
 
@@ -187,7 +171,7 @@ def load_pages(vl_dir: Path, first: int, last: int) -> dict[int, dict]:
     for page in range(first, last + 1):
         path = vl_dir / f"p{page:04d}.json"
         if path.exists():
-            pages[page] = json.loads(path.read_text(encoding="utf-8"))
+            pages[page] = json.loads(path.read_text(encoding="utf-8", errors="strict"))
     return pages
 
 
@@ -381,7 +365,7 @@ def effective_label(block: dict) -> str:
 def page_items(data: dict, vertical: bool, table: dict[str, str], separator: float | None = None,
                heads: set[str] | None = None, in_volumes: bool = False, strict: bool = False,
                pdf_page=None, prefixes: set[str] | None = None, small: bool = True,
-               log: list | None = None, page_number: int | None = None) -> list[dict]:
+               log: list | None = None, page_number: int | None = None, conservative: bool = False) -> list[dict]:
     """一页的块：正文段、标题、注（local 号）、图表记号。
 
     有分隔线时，线那一侧（竖排在左、横排在下）的正文块都是注；以注号开头的开一条新注，不带注号的也开一条新注
@@ -389,6 +373,41 @@ def page_items(data: dict, vertical: bool, table: dict[str, str], separator: flo
     """
     items: list[dict] = []
     log = log if log is not None else []
+    if conservative:
+        # Keep source text and explicit labels; geometric guesses become review tasks.
+        safe_items = []
+        for block in data["parsing_res_list"]:
+            label = block.get("block_label", "text")
+            content = (block.get("block_content") or "").strip()
+            if not content:
+                continue
+            rect = block_rect(block, data)
+            verified = block.get("_structure_verified", False)
+            if label in {"number", "page_number"}:
+                log.append({"kind": "pageNumberSource", "text": content})
+                continue
+            if label in {"header", "footer", "seal"} and verified:
+                log.append({"kind": "reviewedExcluded", "text": content})
+                continue
+            if label in FIGURE_LABELS:
+                safe_items.append({"kind": "figure", "label": label, "rect": rect, "html": content})
+                continue
+            content = fold(re.sub(r"\s*\n\s*", "", content), table)
+            if label in {"footnote", "vision_footnote"} and verified:
+                marker = NOTE_START.match(content)
+                if marker:
+                    safe_items.append({"kind":"note", "local":local_number(marker.group(1)), "text":content[marker.end():], "rect":rect})
+                    continue
+            pending = label in {"header", "footer", "footnote", "vision_footnote", "seal"} or block.get("_needs_review", False)
+            reason = suspect_reason(content, strict)
+            entry = {"kind": "heading" if label in TITLE_LABELS else "para", "level": 1 if label in TITLE_LABELS else 0,
+                     "text": content, "rect": rect, "needsReview": pending, "suspect": reason}
+            if pending:
+                log.append({"kind":"structureCandidate", "sourceId":block.get("_source_id"), "label":label,"text":content})
+            if reason:
+                log.append({"kind":"suspectCandidate", "reason":reason,"text":content})
+            safe_items.append(entry)
+        return safe_items
     if separator is not None:
         # 线那一侧至少有一块以注号开头，才承认是注（版权页的表格线、插图的边框也是细长线）
         marked = False
@@ -562,7 +581,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
         data = pages.get(page)
         guessed = False
         if unnumbered:
-            number = page
+            number = None
         elif printed.get(page):
             number = printed[page]
             last_offset = page - number
@@ -570,7 +589,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
             # 有页码的段里推不出的页（多是插图页）：按前面那段的偏移推一个，标出来
             number = page - last_offset if last_offset is not None else None
             guessed = True
-        anchor = f"<!--p.{number}-->" + ("<!--?page-guess-->" if guessed else "") if number else ""
+        anchor = f"<!--pdf-page.{page}-->" + (f"<!--p.{number}-->" + ("<!--?page-guess-->" if guessed else "") if number else "")
         if data is None:
             stats["missingPages"] += 1
             out.append(f"\n\n{anchor}<!--?vl-missing-->")
@@ -586,7 +605,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
         pdf_page = document[page - 1] if document is not None else None
         separator = note_separator(pdf_page, vertical) if pdf_page is not None else None
         options = {"prefixes": state.get("prefixes"), "small": state.get("small", True),
-                   "page_number": number if isinstance(number, int) else None}
+                   "page_number": number if isinstance(number, int) else None, "conservative": state.get("conservative", True)}
         page_log: list = []
         items = page_items(data, vertical, table, separator, heads, state["inVolumes"], not unnumbered, pdf_page,
                            log=page_log, **options)
@@ -632,13 +651,19 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
                 continue
             if item["kind"] == "suspect":
                 preview = item["text"][:30].replace("--", "－－")
-                out.append(f"\n\n<!--?vl-suspect {item['reason']}：{preview}…-->")
+                out.append(f"\n\n<!--?vl-suspect {item['reason']}：{preview}…-->\n\n{item['text']}")
                 stats["suspectBlocks"] += 1
                 suspects.append({"page": page, "reason": item["reason"], "text": item["text"][:80]})
                 paragraph_open = False
                 continue
             # 注号也会出现在篇题后面（「時務疏（一）」「……八月（一）。」）
             text = REF_RE.sub(replace_ref, item["text"]) if item["kind"] in {"para", "heading"} else item["text"]
+            if item.get("needsReview"):
+                out.append("\n\n<!--?structure-->")
+                stats["structureCandidates"] += 1
+            if item.get("suspect"):
+                out.append("\n\n<!--?vl-suspect-->")
+                stats["suspectBlocks"] += 1
             if item["kind"] == "heading" and item["level"] >= 2:
                 refs = "".join(re.findall(r"\[\^\d+\]", text))
                 plain = re.sub(r"\[\^\d+\]", "", text)
@@ -648,28 +673,16 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
                     text = plain[: note.start()] + " <small>" + note.group(0) + "</small>" + refs
                     stats["titleNotesMarkedSmall"] += 1
             if item["kind"] == "volume":
-                # 卷号按出现顺序校正（VL 把卷二读成「卷一」这类）
-                read = chinese_number(text[1:]) or 0
-                number = read if read > state["volume"] else state["volume"] + 1
-                if number != read:
-                    state["volumeFixes"].append({"page": page, "read": text, "fixed": f"卷{to_chinese(number)}"})
-                state["volume"] = number
-                text = f"卷{to_chinese(number)}"
-                item = {**item, "kind": "heading", "level": 1, "volumeDone": True}
-            if item["kind"] == "heading" and item["level"] == 1 and not item.get("volumeDone"):
-                # VL 标成大标题的卷名常带书名（「明通鑑卷四十二」），也按出现顺序校正卷号：
-                # 读出的卷号不大于上一卷时改成上一卷 +1（《明通鉴》卷四十二曾被读成第二个「卷四十一」）
-                vol = re.fullmatch(r"(.{0,6}?卷)([" + NUMERALS + r"]+)(.{0,8})", text)
-                # 书名页的「卷三十四至五十」是起止范围，不是卷名；封面版权页（无页码段）也不算
-                if vol and (unnumbered or re.match(r"\s*[至到—－~]", vol.group(3))):
-                    vol = None
-                read = chinese_number(vol.group(2)) if vol else None
+                item = {**item, "kind": "heading", "level": 1}
+            if item["kind"] == "heading" and item["level"] == 1:
+                vol = re.search(r"卷([" + NUMERALS + r"]+)", text)
+                read = chinese_number(vol.group(1)) if vol else None
+                if read and read <= state["volume"]:
+                    state.setdefault("volumeCandidates", []).append({"page": page, "read": text, "reason": "non-increasing volume; check original"})
+                    out.append("\n\n<!--?volume-->")
+                    stats["volumeCandidates"] += 1
                 if read:
-                    number = read if read > state["volume"] else state["volume"] + 1
-                    if number != read:
-                        state["volumeFixes"].append({"page": page, "read": text, "fixed": vol.group(1) + to_chinese(number) + vol.group(3)})
-                        text = vol.group(1) + to_chinese(number) + vol.group(3)
-                    state["volume"] = number
+                    state["volume"] = read
             if item["kind"] == "heading":
                 out.append(("\n\n" + anchor if not placed_anchor else "") + "\n\n" + "#" * item["level"] + " " + text)
                 placed_anchor = True
@@ -709,7 +722,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
     # 书配置要的页码偏移：文件基本偏移（第一段），插页之后偏移变了的各段写成 pageRangeOffsets
     runs: list[list[int]] = []  # [印刷起, 印刷止, 偏移]
     for page in range(first, last + 1):
-        number = page if unnumbered else printed.get(page)
+        number = printed.get(page)
         if not number:
             continue
         offset = page - number
@@ -722,7 +735,7 @@ def build(pages: dict[int, dict], printed: dict[int, int | None], segment: tuple
                "pageRangeOffsets": [f"{file_name}|{a}-{b}|{o}" for a, b, o in runs[1:] if o != runs[0][2]],
                "conflicts": [[a, b] for i, (a, b, _) in enumerate(runs) for (c, d, _) in runs[i + 1:] if not (b < c or d < a)]}
     stats["offsets"] = offsets
-    numbers = [page if unnumbered else printed.get(page) for page in range(first, last + 1)]
+    numbers = [printed.get(page) for page in range(first, last + 1)]
     numbers = [n for n in numbers if n]
     front = ["---", f'book: "{title}"', *[f"{key}: {value}" for key, value in (state.get("meta") or {}).items()],
              f'篇章: "{name.split("-", 1)[-1]}"', f"物理页: {first}-{last}",
@@ -746,7 +759,7 @@ def main() -> None:
     b = sub.add_parser("build")
     b.add_argument("--vl-dir", type=Path, required=True)
     b.add_argument("--pdf", type=Path, required=True, help="原 PDF：在页面图上找页下注的分隔线")
-    b.add_argument("--pages-report", type=Path, required=True)
+    b.add_argument("--pages-report", type=Path, help="已核验印刷页码报告；省略时只标 PDF 物理页")
     b.add_argument("--segment", action="append", required=True, help="起-止:文件名，如 99-497:02-正文.md")
     b.add_argument("--variant-equivalent", action="append", default=[], help="本书字形表，如 黄黃（第一个是原书字形）")
     b.add_argument("--writing-mode", choices=("horizontal-tb", "vertical-rl"), default="horizontal-tb")
@@ -757,6 +770,7 @@ def main() -> None:
                    help="整理报告路径；默认 <书>/_数据/过程报告/_vl_build_report.json（--out-dir 在 _数据 下时自动找回书文件夹）")
     b.add_argument("--item-numbers", action="store_true",
                    help="本书有条首阿拉伯条目号（编年体点校本）：套 <sup class=\"item\"> 标出。默认关；报告会提示要不要开")
+    b.add_argument("--legacy-heuristics", action="store_true", help="启用旧版结构推断；仍不自动改卷号或删疑似编造正文")
     b.add_argument("--no-small", action="store_true", help="不按字号标 <small> 小字（误标太多时用；占比过高时也会自动停用）")
     args = parser.parse_args()
 
@@ -782,12 +796,12 @@ def main() -> None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps({"printed": {str(k): v for k, v in printed.items()}, "runs": runs,
                                            "unknownReasons": unknown},
-                                          ensure_ascii=False, indent=1), encoding="utf-8")
+                                          ensure_ascii=False, indent=1), encoding="utf-8", errors="strict")
         print(f"VL_PAGES pages={len(pages)} runs={len(runs)} unknown={sum(1 for v in printed.values() if v is None)}")
         return
 
-    report = json.loads(args.pages_report.read_text(encoding="utf-8"))
-    printed = {int(k): v for k, v in report["printed"].items()}
+    report = json.loads(args.pages_report.read_text(encoding="utf-8", errors="strict")) if args.pages_report else {}
+    printed = {int(k): v for k, v in report.get("printed", {}).items()}
     table: dict[str, str] = {}
     for group in args.variant_equivalent:
         chars = [c for c in group if not c.isspace()]
@@ -806,10 +820,13 @@ def main() -> None:
     prefixes = head_prefixes(pages)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     state = new_state(args.out_dir / "images")
+    state["conservative"] = not args.legacy_heuristics
     state["meta"] = dict(item.split("=", 1) for item in args.meta)
     state["prefixes"] = prefixes
     state["itemNumbers"] = args.item_numbers
-    summary = {"_runningHeads": sorted(heads), "_headPrefixes": sorted(prefixes)}
+    summary = {"_runningHeads": sorted(heads), "_headPrefixes": sorted(prefixes),
+               "_sourcePageLabels": {str(n): [b.get("block_content", "") for b in d["parsing_res_list"] if b.get("block_label") in {"number", "page_number"}] for n,d in pages.items()},
+               "_pageLabelPolicy": "PDF physical anchors always; printed labels only from an explicitly supplied report"}
     warnings: list[str] = []
     vertical = args.writing_mode == "vertical-rl"
     for first, last, name in segments:
@@ -829,7 +846,7 @@ def main() -> None:
         elif state["small"] and stats.get("smallParagraphs", 0) > 0.05 * paragraphs:
             warnings.append(f"{name}：小字段 {stats['smallParagraphs']}/{paragraphs}。按字号认小字会误标（短段列宽量不准），"
                             "抽 5 处看原图；多数不是小字就加 --no-small 重跑")
-        (args.out_dir / name).write_text(text, encoding="utf-8")
+        (args.out_dir / name).write_text(text, encoding="utf-8", errors="strict")
         summary[name] = {**stats, "outline": heading_outline(text)}
         items = stats.get("itemNumberParas", 0)
         if items > 0.3 * paragraphs and not args.item_numbers:
@@ -837,9 +854,11 @@ def main() -> None:
                             "问用户要不要用 --item-numbers 标出；不开则照原样保留")
         suspects = stats.get("suspectBlocks", 0)
         if suspects > max(5, 0.01 * paragraphs):
-            warnings.append(f"{name}：{suspects} 块被判为编造、没进正文，超过正文段数的 1%。先抽几块看原图，"
+            warnings.append(f"{name}：{suspects} 块被标为疑似编造、原文保留待核，超过正文段数的 1%。先抽几块看原图，"
                             "若是真正文被误判，停下来报告，不要交付")
     summary["_volumeFixes"] = state["volumeFixes"]
+    summary["_volumeCandidates"] = state.get("volumeCandidates", [])
+    summary["_conservative"] = state["conservative"]
     summary["_images"] = state["images"]
     summary["_headsRemoved"] = state.get("headLog", [])
     summary["_ruleWithoutNotes"] = state.get("ruleWithoutNotes", [])
@@ -851,7 +870,7 @@ def main() -> None:
         root = Path(*parts[: len(parts) - 1 - parts[::-1].index("_数据")]) if "_数据" in parts else args.out_dir
         report = root / "_数据" / "过程报告" / "_vl_build_report.json"
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+    report.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8", errors="strict")
     print("VL_BUILD " + " ".join(f"{k.encode('ascii', 'backslashreplace').decode()}={v.get('paragraphs', 0)}p/{v.get('notes', 0)}n/{v.get('suspectBlocks', 0)}s"
                                 for k, v in summary.items() if not k.startswith("_")) + f" warnings={len(warnings)}")
 

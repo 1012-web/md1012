@@ -23,7 +23,7 @@ def main():
     ap.add_argument('--images-dir', default=None)
     a = ap.parse_args()
 
-    text = open(a.md, encoding='utf-8').read()
+    text = open(a.md, encoding='utf-8', errors="strict").read()
     R = ['# 成品自检: %s\n\n' % os.path.basename(a.md)]
     problems = []
 
@@ -83,7 +83,7 @@ def main():
     R.append('MinerU 标签残留: %d\n' % len(tags))
     if tags:
         problems.append('还有 %d 处 <sub>/<sup> 没清干净' % len(tags))
-    for mark in ('<!--?quote-->', '<!--?center-->'):
+    for mark in ('<!--?quote-->', '<!--?center-->', '<!--?structure-->', '<!--?volume-->', '<!--?page-guess-->'):
         n = text.count(mark)
         if n:
             problems.append('还有 %d 处 %s 待复核标记没处理' % (n, mark))

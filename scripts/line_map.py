@@ -127,7 +127,7 @@ def markdown_streams(files: list[Path]) -> tuple[Stream, Stream, list[str]]:
     body, notes = Stream(), Stream()
     texts = []
     for number, path in enumerate(files):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="strict")
         texts.append(text)
         offsets = utf16_offsets(text)
         masked = [False] * len(text)
@@ -172,7 +172,7 @@ def mineru_blocks(parts: list[tuple[Path, int]], doc) -> list[Block]:
     blocks: list[Block] = []
     pages: dict[int, dict[str, Any]] = {}
     for path, start in parts:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
         for index, page in enumerate(payload["pdf_info"]):
             pages[start + index] = page
     # 跨页段落：MinerU 把下一页开头的行挪进上一页的段尾（坐标仍是下一页的），下一页留一个
@@ -218,7 +218,7 @@ def vl_blocks(vl_dir: Path, pages: list[int], doc, vertical_book: bool) -> list[
         path = vl_dir / f"p{number:04d}.json"
         if not path.exists():
             continue
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="strict"))
         kept = [b for b in data.get("parsing_res_list", [])
                 if b.get("block_label") not in SKIP_LABELS and (b.get("block_content") or "").strip()]
         rects = [norm(b["block_bbox"], data["width"], data["height"]) for b in kept]
@@ -441,7 +441,7 @@ VISIBLE_STRIP = re.compile(r"<!--.*?-->|%%.*?%%|\[\^[^\]]+\]:?|</?[A-Za-z][^>]*>
 def textlayer_spec(files_out: dict[str, Any], files: list[Path], vertical_book: bool, pdf: Path) -> dict[str, Any]:
     pages: dict[str, list[list[Any]]] = {}
     for path in files:
-        data = path.read_text(encoding="utf-8").encode("utf-16-le")
+        data = path.read_text(encoding="utf-8", errors="strict").encode("utf-16-le")
         for entry in files_out[path.name]["lines"]:
             if entry["kind"] != "line":
                 continue
@@ -459,24 +459,61 @@ def textlayer_spec(files_out: dict[str, Any], files: list[Path], vertical_book: 
             "pages": dict(sorted(pages.items(), key=lambda kv: int(kv[0])))}
 
 
+def explicit_page_mapping(files: list[Path], page_count: int) -> dict:
+    """A lightweight map from explicit physical-page anchors; no layout inference."""
+    pattern = re.compile(r"<!--pdf-page\.(\d+)-->")
+    mapped = {}
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="strict")
+        offsets = utf16_offsets(text)
+        anchors = list(pattern.finditer(text))
+        if not anchors:
+            raise ValueError(f"No explicit PDF-page anchors in {path.name}")
+        lines = []
+        for index, match in enumerate(anchors):
+            page = int(match[1])
+            if not 1 <= page <= page_count:
+                raise ValueError(f"Physical page outside source PDF: {page}")
+            end = anchors[index+1].start() if index+1<len(anchors) else len(text)
+            lines.append({"from":offsets[match.end()],"to":offsets[end],"page":page,"rect":None,
+                          "kind":"page","method":"explicit-pdf-anchor","estimated":False})
+        mapped[path.name] = {"hash":hashlib.sha256(text.encode("utf-8")).hexdigest(),"lines":lines}
+    return mapped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pdf", type=Path, required=True)
     parser.add_argument("--md", type=Path, action="append", required=True, help="成品 Markdown，按原书顺序给")
     parser.add_argument("--layout", action="append", default=[], help="MinerU layout.json|物理起页")
     parser.add_argument("--vl-dir", type=Path, help="VL 逐页结果目录（paddle_api.py 的输出）")
+    parser.add_argument("--page-only", action="store_true", help="只按 <!--pdf-page.N--> 生成页级映射，不分析版面")
     parser.add_argument("--pages", help="只映射这些物理页（VL 源），如 1-497；默认全部")
     parser.add_argument("--writing-mode", choices=("horizontal-tb", "vertical-rl"), default="horizontal-tb")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--spec", type=Path, help="另出文字层清单（.json.gz）")
     args = parser.parse_args()
-    if bool(args.layout) == bool(args.vl_dir):
-        raise SystemExit("give either --layout (MinerU source) or --vl-dir (VL source)")
+    if sum([bool(args.layout),bool(args.vl_dir),args.page_only]) != 1:
+        raise SystemExit("choose one: --layout, --vl-dir or --page-only")
 
     import pymupdf
 
     doc = pymupdf.open(args.pdf)
     vertical_book = args.writing_mode == "vertical-rl"
+    if args.page_only:
+        if args.spec:
+            raise SystemExit("Page-only mapping cannot generate a positioned PDF text layer")
+        files_out = explicit_page_mapping(args.md, doc.page_count)
+        args.out.mkdir(parents=True,exist_ok=True)
+        result = {"version":1,"granularity":"page","source":"explicit-pdf-anchors","writingMode":args.writing_mode,
+                  "pdf":args.pdf.name,"files":files_out}
+        (args.out/"line-map.json").write_text(json.dumps(result,ensure_ascii=False),encoding="utf-8",errors="strict")
+        report = {"granularity":"page","pages":sorted({e["page"] for f in files_out.values() for e in f["lines"]}),
+                  "positioned_lines":0,"note":"Physical-page association only; no line coordinates."}
+        (args.out/"line-map.report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8",errors="strict")
+        doc.close()
+        print(f"PAGE_MAP files={len(files_out)} pages={len(report['pages'])}")
+        return
     if args.layout:
         parts = [(Path(v.rsplit("|", 1)[0]), int(v.rsplit("|", 1)[1])) for v in args.layout]
         blocks = mineru_blocks(parts, doc)
@@ -509,12 +546,12 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     result = {"version": 1, "granularity": "line", "source": source, "writingMode": args.writing_mode,
               "pdf": args.pdf.name, "files": files_out}
-    (args.out / "line-map.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    (args.out / "line-map.report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    (args.out / "line-map.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8", errors="strict")
+    (args.out / "line-map.report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8", errors="strict")
     if args.spec:
         spec = textlayer_spec(files_out, args.md, vertical_book, args.pdf)
         args.spec.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(args.spec, "wt", encoding="utf-8") as handle:
+        with gzip.open(args.spec, "wt", encoding="utf-8", errors="strict") as handle:
             json.dump(spec, handle, ensure_ascii=False, separators=(",", ":"))
     print(f"LINEMAP source={source} blocks={report['blocks']} lines={report['lines']} "
           f"blockLevel={report['blockLevelCount']} unmapped={report['unmappedCount']} coverage={report['coverage']}")
